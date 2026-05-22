@@ -8,3 +8,4 @@ __pycache__/
 *.pyo
 logs/
 .DS_Store
+migreradb_sqlite_till_pg.py

@@ -49,10 +49,17 @@ Redigera `.env` och ange korrekt `DATABASE_URL`.
 
 **3. Initiera databas och kör synkskript**
 
-Initial synk av Finlex-lagstiftning (kan ta flera timmar):
+Initial synk av Finlex-lagstiftning (kan ta flera dagar):
 
 ```
 python3 01_synka_finlex.py --alla
+```
+
+Bygg chunks och embeddings (kör efter avslutad synk):
+
+```
+python3 03_chunka_och_embedda.py --sprak bada --tvinga
+python3 03_chunka_och_embedda.py --bygg-index
 ```
 
 Voteringshistorik 1996–2014:

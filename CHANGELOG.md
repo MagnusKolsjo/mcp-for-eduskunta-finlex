@@ -4,6 +4,16 @@ Alla väsentliga ändringar dokumenteras här.
 Formatet följer [Keep a Changelog](https://keepachangelog.com/sv/1.0.0/)
 och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.0.1] — 2026-05-22
+
+### Fixat
+- `README.md` — installationstiden för `01_synka_finlex.py --alla` korrigerad
+  från "timmar" till "dagar" (faktisk körtid 2–3 dagar)
+- `README.md` — installationssteg för chunkning och embeddings lagt till direkt
+  efter Finlex-synken (`03_chunka_och_embedda.py --sprak bada --tvinga` + `--bygg-index`)
+
 ## [Opublicerad] — 2026-05-17
 
 ### Lagt till
