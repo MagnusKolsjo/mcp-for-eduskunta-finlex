@@ -640,6 +640,108 @@ def vektor_sok(
     ]
 
 
+def vektor_sok_i_dokument(
+    dokument_id: int,
+    embedding: list[float],
+    sprak: str = "fi",
+    max_treff: int = 5,
+) -> dict:
+    """
+    Semantisk sökning via pgvector inom ett enskilt cachat dokument.
+
+    Returnerar dokumentmetadata + topp-N chunk-träffar sorterade efter
+    cosinus-likhet. Kräver PostgreSQL med pgvector — SQLite-läge har
+    inga embeddings och stöds inte.
+
+    dokument_id — intern PK i finland.dokument
+    embedding   — frågans vektorkod (768 dim, TurkuNLP eller KBLab)
+    sprak       — "fi" → embedding_fi + text_fi, "sv" → embedding_sv + text_sv
+    max_treff   — max antal chunk-träffar att returnera (standard 5)
+    """
+    if not _ar_postgres():
+        return {"fel": "Semantisk sökning kräver PostgreSQL med pgvector — SQLite-läge stöds inte."}
+
+    emb_kol   = "embedding_fi" if sprak == "fi" else "embedding_sv"
+    text_kol  = "text_fi"      if sprak == "fi" else "text_sv"
+    titel_kol = "titel_fi"     if sprak == "fi" else "titel_sv"
+
+    # Hämta dokumentmetadata och räkna chunks
+    with _pg_anslutning() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT id, edk_id, eduskuntatunnus_fi, eduskuntatunnus_sv,
+                           kalla, typ, {titel_kol} AS titel, ar, datum
+                    FROM finland.dokument WHERE id = %s""",
+                (dokument_id,)
+            )
+            rad = cur.fetchone()
+            if not rad:
+                return {"fel": f"Dokument med id={dokument_id} finns inte i databasen."}
+            dok_meta = {
+                "dokument_id":       rad[0],
+                "edk_id":            rad[1],
+                "eduskuntatunnus_fi": rad[2],
+                "eduskuntatunnus_sv": rad[3],
+                "kalla":             rad[4],
+                "typ":               rad[5],
+                "titel":             rad[6],
+                "ar":                rad[7],
+                "datum":             str(rad[8]) if rad[8] else None,
+            }
+
+            cur.execute(
+                f"SELECT COUNT(*) FROM finland.chunks WHERE dokument_id = %s AND {emb_kol} IS NOT NULL",
+                (dokument_id,)
+            )
+            antal_chunks = cur.fetchone()[0]
+
+    if antal_chunks == 0:
+        return {
+            **dok_meta,
+            "antal_chunks": 0,
+            "fel": (
+                "Dokumentet har inga chunks med embeddings — "
+                "fulltext saknas eller chunkning/indexering ej körd."
+            ),
+        }
+
+    vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
+
+    try:
+        with _pg_anslutning() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT chunk_index,
+                               {text_kol} AS text,
+                               1 - (c.{emb_kol} <=> %s::vector) AS likhet
+                        FROM   finland.chunks c
+                        WHERE  c.dokument_id = %s
+                          AND  c.{emb_kol} IS NOT NULL
+                        ORDER  BY c.{emb_kol} <=> %s::vector
+                        LIMIT  %s""",
+                    (vec_str, dokument_id, vec_str, max_treff)
+                )
+                traffar = [
+                    {
+                        "chunk_index": r[0],
+                        "text":        r[1],
+                        "likhet":      round(float(r[2]), 4) if r[2] is not None else 0.0,
+                    }
+                    for r in cur.fetchall()
+                ]
+    except Exception as exc:
+        log.error("vektor_sok_i_dokument misslyckades (id=%s): %s", dokument_id, exc)
+        return {**dok_meta, "fel": str(exc)}
+
+    return {
+        **dok_meta,
+        "fraga_sprak":   sprak,
+        "antal_chunks":  antal_chunks,
+        "antal_traffar": len(traffar),
+        "traffar":       traffar,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Voteringar
 # ---------------------------------------------------------------------------

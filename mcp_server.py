@@ -9,7 +9,9 @@ Exponerar följande verktyg:
   fi_sok              — Aggregerad sökning över alla finska källor (fanout)
   fi_sok_eduskunta    — Strukturerad sökning i riksdagsdokument (api.eduskunta.fi)
   fi_sok_finlex       — FTS + semantisk sökning i lokal Finlex-databas
+  fi_sok_i_dokument   — Semantisk sökning via pgvector inom ett enskilt cachat dokument
   fi_hamta_dokument   — Hämtar fulltext via edktunnus eller eduskuntatunnus
+  fi_hamta_arende     — Ärendelivscykel, kärnedokument och expertutlåtanden
   fi_hamta_lag        — Hämtar specifik lag/proposition från Finlex (AKN XML)
   fi_hamta_aanestys   — Voteringsresultat
   fi_lista_vaalikaudet — Valperioder och riksmöten (fr.o.m. 1907)
@@ -967,6 +969,79 @@ def fi_hamta_aanestys(
         radata = ed.hamta_istunnon_aanestykset(istuntotunnus)
         return _summarisera_aanestykset(radata)
     return {"fel": "Ange aanestystunnus, eduskuntatunnus, istuntotunnus eller senaste=True"}
+
+
+@mcp.tool()
+def fi_sok_i_dokument(
+    fraga: str,
+    edk_id: Optional[str] = None,
+    eduskuntatunnus: Optional[str] = None,
+    max_treff: int = 5,
+) -> dict:
+    """
+    Semantisk sökning via pgvector inom ett enskilt cachat dokument.
+
+    Används för att hitta specifika stycken i ett riksdagsdokument eller en
+    lag utan att läsa hela fulltexten. Kräver PostgreSQL med pgvector samt
+    att dokumentet är chunkat och indexerat (03_chunka_och_embedda.py).
+
+    Parametrar:
+      fraga           — vad du söker efter, på finska eller svenska
+      edk_id          — dokumentets edktunnus, t.ex. "EDK-2026-AK-8746"
+                        (returneras av fi_sok_eduskunta och fi_hamta_dokument)
+      eduskuntatunnus — riksdagsbeteckning, t.ex. "HE 15/2026 vp" eller "RP 15/2026 rd"
+                        (antingen fi- eller sv-form fungerar)
+      max_treff       — max antal chunk-träffar att returnera (standard 5)
+
+    Minst ett av edk_id eller eduskuntatunnus måste anges.
+
+    Returnerar dokumentmetadata + lista med matchande chunk-träffar sorterade
+    efter semantisk likhet, med chunk_index, text och likhetspoäng.
+
+    Typiskt arbetsflöde:
+      1. fi_sok_eduskunta(fraga=...) → identifiera dokument, notera edk_id
+      2. fi_sok_i_dokument(fraga=..., edk_id=...) → hitta relevanta stycken
+      3. fi_hamta_dokument(edk_id=...) → hämta fulltext vid behov
+    """
+    if not edk_id and not eduskuntatunnus:
+        return {"fel": "Ange edk_id eller eduskuntatunnus."}
+
+    if not db.ar_postgres():
+        return {"fel": "Semantisk sökning kräver PostgreSQL med pgvector — SQLite-läge stöds inte."}
+
+    # Slå upp dokumentets interna id
+    if edk_id:
+        cachad = db.hamta_dokument_via_edk_id(edk_id)
+    else:
+        cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
+
+    if not cachad:
+        identifierare = edk_id or eduskuntatunnus
+        return {
+            "fel": (
+                f"Dokumentet '{identifierare}' finns inte i lokal cache. "
+                "Hämta det först med fi_hamta_dokument så att det indexeras."
+            ),
+            "edk_id":          edk_id,
+            "eduskuntatunnus": eduskuntatunnus,
+        }
+
+    dokument_id = cachad["id"]
+
+    # Detektera frågespråk och generera embedding med rätt modell
+    sprak = _detektera_sprak(fraga)
+    try:
+        embedding = _embedda(fraga, sprak)
+    except Exception as exc:
+        log.error("fi_sok_i_dokument: embedding misslyckades: %s", exc)
+        return {"fel": f"Embedding misslyckades: {exc}"}
+
+    return db.vektor_sok_i_dokument(
+        dokument_id=dokument_id,
+        embedding=embedding,
+        sprak=sprak,
+        max_treff=max_treff,
+    )
 
 
 @mcp.tool()

@@ -6,6 +6,17 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-22
+
+### Lagt till
+- `db.py` — `vektor_sok_i_dokument()`: semantisk pgvector-sökning scoped till ett enskilt
+  cachat dokument. Tar `dokument_id`, `embedding`, `sprak` och `max_treff`. Returnerar
+  chunk-träffar med `chunk_index`, `text` och `likhet` (cosine similarity).
+- `mcp_server.py` — `fi_sok_i_dokument`: nytt MCP-verktyg. Tar `fraga` + `edk_id` eller
+  `eduskuntatunnus` + valfritt `max_treff`. Detekterar frågespråk (fi/sv) automatiskt,
+  embeddar med TurkuNLP eller KBLab och returnerar chunk-träffar från `finland.chunks`.
+  Totalt 9 MCP-verktyg i Finland-strömmen.
+
 ## [1.0.1] — 2026-05-22
 
 ### Fixat
