@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Magnus Kolsjö
 
 """
-db.py — Databaslager för arbetsström 15 (Finland)
+db.py — Databaslager för finsk riksdags- och rättsdata
 
 Hanterar initiering och anslutning till:
   - PostgreSQL + pgvector (schema: finland)

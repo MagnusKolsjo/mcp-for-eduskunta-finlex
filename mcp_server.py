@@ -56,6 +56,12 @@ MCP_HOST      = os.getenv("MCP_HOST",      "127.0.0.1")
 MCP_PORT      = int(os.getenv("MCP_PORT",  "8005"))
 MCP_API_KEY   = os.getenv("MCP_API_KEY",   "")
 
+# Standardtak för fulltext i hämtverktygen. Materialet innehåller dokument på
+# flera miljoner tecken — utan ett tak som gäller by default kan ett anrop
+# överskrida MCP-protokollets storleksgräns och misslyckas helt. Anroparen kan
+# alltid höja taket eller sätta 0 för hela texten.
+FI_MAX_TECKEN = int(os.getenv("FI_MAX_TECKEN", "60000"))
+
 # Embeddingmodeller (laddas lazily vid första semantiska sökning)
 EMBEDDING_MODEL_FI = os.getenv("EMBEDDING_MODEL_FI", "TurkuNLP/sbert-cased-finnish-paraphrase")
 EMBEDDING_MODEL_SV = os.getenv("EMBEDDING_MODEL_SV", "KBLab/sentence-bert-swedish-cased")
@@ -87,11 +93,56 @@ mcp = FastMCP(
         "MCP-server för finsk riksdags- och rättsdata. "
         "Täcker Eduskunta (Finlands riksdag) och Finlex (finsk lagstiftning). "
         "Verktygen har prefixet fi_. "
-        "Söktermen kan innehålla kommaseparerade ord — de tolkas som OR-logik. "
+        "SÖKTERMER: komma separerar termer och ger OR mellan dem; flera ord inom "
+        "en term ger AND — alla orden måste förekomma. "
         "Dokumenten finns på både finska och svenska. "
-        "För citat hämtas alltid den svenska källtexten, inte en maskinöversättning."
+        "För citat hämtas alltid den svenska källtexten, inte en maskinöversättning. "
+        "SVARSSTORLEK: dokumenten här är bland de största i materialet — det största "
+        "är över 4,7 miljoner tecken och ett sjuttiotal överskrider svarsgränsen. "
+        "Eftersom både finsk och svensk version returneras fördubblas volymen. "
+        "fi_hamta_dokument och fi_hamta_lag tar därför max_tecken och fran_tecken; "
+        "använd hamta_fulltext=False när bara metadata behövs, och sök riktat med "
+        "fi_sok_i_dokument i stället för att läsa hela texter. "
+        "CITAT: citera aldrig ur en text där trunkerad_fi eller trunkerad_sv är true."
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Textutdrag och trunkering
+# ---------------------------------------------------------------------------
+
+def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
+    """
+    Skär ut ett textutdrag och redovisa alltid vad som kapats.
+
+    Trunkering utan markering är ett tyst datafel — svaret ser ut att vara hela
+    innehållet. max_tecken <= 0 betyder ingen trunkering. Klipper på ordgräns.
+    """
+    text   = text or ""
+    totalt = len(text)
+    start  = max(0, min(fran_tecken, totalt))
+    rest   = text[start:]
+
+    if max_tecken and max_tecken > 0 and len(rest) > max_tecken:
+        utdrag    = rest[:max_tecken]
+        brytpunkt = max(utdrag.rfind(" "), utdrag.rfind("\n"))
+        if brytpunkt > max_tecken * 0.6:
+            utdrag = utdrag[:brytpunkt]
+        utdrag    = utdrag.rstrip()
+        trunkerad = True
+    else:
+        utdrag    = rest
+        trunkerad = False
+
+    slut = start + len(utdrag)
+    return {
+        "text":                 utdrag,
+        "tecken_totalt":        totalt,
+        "tecken_visade":        len(utdrag),
+        "trunkerad":            trunkerad,
+        "fortsatt_fran_tecken": slut if slut < totalt else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +549,8 @@ def fi_hamta_dokument(
     edk_id: Optional[str] = None,
     eduskuntatunnus: Optional[str] = None,
     hamta_fulltext: bool = True,
+    max_tecken: int = FI_MAX_TECKEN,
+    fran_tecken: int = 0,
 ) -> dict:
     """
     Hämtar metadata och fulltext för ett riksdagsdokument från api.eduskunta.fi.
@@ -509,6 +562,20 @@ def fi_hamta_dokument(
     Svaret innehåller alltid:
       fulltext_fi — finsk fulltext (för sökning och analys)
       fulltext_sv — svensk fulltext (för citat till användaren, None om saknas)
+
+    Parametrar:
+      max_tecken  — teckentak PER språkversion (0 = hela texten).
+      fran_tecken — börja texten vid denna teckenposition, för att läsa vidare.
+
+    STORLEK: dokumenten här är bland de största i hela materialet — det största
+    är över 4,7 miljoner tecken, och ett sjuttiotal överskrider MCP-protokollets
+    storleksgräns per svar. Eftersom både finsk och svensk version returneras
+    fördubblas volymen. Sätt därför max_tecken för långa dokument, eller
+    hamta_fulltext=False när bara metadata behövs, och sök riktat med
+    fi_sok_i_dokument i stället för att läsa hela texten.
+
+    Kapade texter bär fälten trunkerad_fi/trunkerad_sv, tecken_totalt_fi/_sv och
+    fortsatt_fran_tecken. Citera aldrig ur en kapad text.
 
     Minst ett av edk_id eller eduskuntatunnus måste anges.
     """
@@ -526,6 +593,8 @@ def fi_hamta_dokument(
         if not hamta_fulltext:
             cachad = {k: v for k, v in cachad.items()
                       if k not in ("fulltext_fi", "fulltext_sv", "fulltext_html", "fulltext_md")}
+        else:
+            cachad = _begransa_tvasprakig(dict(cachad), max_tecken, fran_tecken)
         return {"kalla": "cache", "dokument": cachad}
 
     # Hämta finskt primärdokument
@@ -604,15 +673,43 @@ def fi_hamta_dokument(
         fulltext_sv=fulltext_sv,
     )
 
+    # Databasen har alltid hela texten — trunkeringen gäller bara svaret.
     return {
         "kalla":           "eduskunta",
         "edk_id":          edk_id,
         "edk_id_sv":       edk_id_sv,
         "html_saatavilla": html_saatavilla,
         "metadata":        meta,
-        "fulltext_fi":     fulltext_fi,   # för sökning och analys
-        "fulltext_sv":     fulltext_sv,   # för citat till användaren
+        **_begransa_tvasprakig(
+            {"fulltext_fi": fulltext_fi, "fulltext_sv": fulltext_sv},
+            max_tecken, fran_tecken,
+        ),
     }
+
+
+def _begransa_tvasprakig(d: dict, max_tecken: int, fran_tecken: int = 0) -> dict:
+    """
+    Tillämpar teckentaket på båda språkversionerna i ett dokumentsvar.
+
+    Taket gäller per språk, eftersom fi och sv är två självständiga texter som
+    båda kan citeras. Varje kapad text får egna redovisningsfält så att det
+    framgår vilken version som är avkortad.
+    """
+    for nyckel, suffix in (("fulltext_fi", "fi"), ("fulltext_sv", "sv")):
+        text = d.get(nyckel)
+        if not text:
+            continue
+        utdrag = _skar_ut(text, max_tecken, fran_tecken)
+        d[nyckel] = utdrag["text"]
+        d[f"tecken_totalt_{suffix}"] = utdrag["tecken_totalt"]
+        d[f"trunkerad_{suffix}"]     = utdrag["trunkerad"]
+        if utdrag["trunkerad"]:
+            d[f"fortsatt_fran_tecken_{suffix}"] = utdrag["fortsatt_fran_tecken"]
+            d["las_vidare"] = (
+                "Texten är kapad. Läs vidare med fran_tecken, eller sök riktat "
+                "med fi_sok_i_dokument i stället för att läsa hela dokumentet."
+            )
+    return d
 
 
 def _tvasprakigt(field) -> dict:
@@ -775,6 +872,8 @@ def fi_hamta_lag(
     typ: str = "statute",
     myndighetskod: Optional[str] = None,
     akn_uri_fi: Optional[str] = None,
+    max_tecken: int = FI_MAX_TECKEN,
+    fran_tecken: int = 0,
 ) -> dict:
     """
     Hämtar en specifik lag, proposition eller förordning från Finlex (AKN XML).
@@ -825,11 +924,14 @@ def fi_hamta_lag(
     # Kolla cache — returnera om båda finns
     cachad = db.hamta_dokument_via_akn_uri(akn_uri_fi)
     if cachad and cachad.get("fulltext_fi") and cachad.get("fulltext_sv"):
+        # Trunkera i cachad-dicten själv. Att lägga kapade kopior bredvid en
+        # orörd dokument-post hjälper inte — hela texten följer ändå med i svaret.
+        cachad = _begransa_tvasprakig(dict(cachad), max_tecken, fran_tecken)
         return {
-            "kalla":      "cache",
-            "dokument":   cachad,
-            "fulltext_fi": cachad.get("fulltext_fi"),   # för sökning och analys
-            "fulltext_sv": cachad.get("fulltext_sv"),   # för citat till användaren
+            "kalla":       "cache",
+            "dokument":    cachad,
+            "fulltext_fi": cachad.get("fulltext_fi"),
+            "fulltext_sv": cachad.get("fulltext_sv"),
         }
 
     # Hämta finska versionen
@@ -878,8 +980,11 @@ def fi_hamta_lag(
         "metadata":   meta,
         "akn_uri_fi": akn_uri_fi,
         "akn_uri_sv": akn_uri_sv,
-        "fulltext_fi": fulltext_fi,   # för sökning och analys
-        "fulltext_sv": fulltext_sv,   # för citat till användaren
+        # Databasen har alltid hela texten — trunkeringen gäller bara svaret.
+        **_begransa_tvasprakig(
+            {"fulltext_fi": fulltext_fi, "fulltext_sv": fulltext_sv},
+            max_tecken, fran_tecken,
+        ),
     }
 
 

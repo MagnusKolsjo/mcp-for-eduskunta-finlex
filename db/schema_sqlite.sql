@@ -1,4 +1,4 @@
--- schema_sqlite.sql — SQLite-schema för arbetsström 15 (Finland)
+-- schema_sqlite.sql — SQLite-schema för finsk riksdags- och rättsdata
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- Copyright (C) 2026 Magnus Kolsjö
 --

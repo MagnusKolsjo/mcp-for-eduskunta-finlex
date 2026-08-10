@@ -1,4 +1,4 @@
-# Arbetsström 15 — Finland (Eduskunta, Finlex)
+# MCP-server för finsk riksdags- och rättsdata (Eduskunta, Finlex)
 # Installera: pip install -r requirements.txt
 
 # MCP-server

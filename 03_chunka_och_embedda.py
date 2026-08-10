@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Magnus Kolsjö
 
 """
-03_chunka_och_embedda.py — Chunkning och embedding för arbetsström 15 (Finland)
+03_chunka_och_embedda.py — Chunkning och embedding för finsk riksdags- och rättsdata
 
 Läser fulltext_fi och fulltext_sv från finland.dokument, delar upp i stycken
 och genererar vektorer med två språkspecifika modeller:
@@ -237,10 +237,10 @@ def _hamta_dokument_att_embeda(
 
     if not tvinga:
         villkor_delar.append(f"""
-            NOT EXISTS (
+            EXISTS (
                 SELECT 1 FROM finland.chunks c
                 WHERE c.dokument_id = d.id
-                  AND c.{emb_kol} IS NOT NULL
+                  AND c.{emb_kol} IS NULL
             )
         """)
 

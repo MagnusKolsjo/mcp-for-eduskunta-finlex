@@ -4,7 +4,47 @@ Alla väsentliga ändringar dokumenteras här.
 Formatet följer [Keep a Changelog](https://keepachangelog.com/sv/1.0.0/)
 och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] — 2026-08-10
+
+### Tillagt
+
+- **`max_tecken` och `fran_tecken` i `fi_hamta_dokument` och `fi_hamta_lag`**, med
+  standardtaket `FI_MAX_TECKEN` (60 000 tecken, konfigurerbart i `.env`). Taket gäller
+  per språkversion eftersom både finsk och svensk text returneras. Kapade texter bär
+  `trunkerad_fi`/`trunkerad_sv`, `tecken_totalt_fi`/`_sv` och `fortsatt_fran_tecken_*`.
+  Kapningen sker på ordgräns; `max_tecken=0` ger hela texten som ett uttryckligt val.
+- **`instructions`-sträng utökad** med storleksregeln, citatregeln och det skärpta
+  sökkontraktet (komma = OR mellan termer, blanksteg = AND inom en term).
+
+### Fixat
+
+- **🔴 Omvänt skip-villkor i `03_chunka_och_embedda.py` gjorde partiellt embeddade
+  dokument omöjliga att komplettera.** Urvalsfrågan i `_hamta_dokument_att_embeda`
+  använde `NOT EXISTS (… AND c.<embedding-kolumn> IS NOT NULL)`, vilket hoppar över
+  varje dokument som har *minst en* embedding — i stället för att hoppa över dokument
+  där *alla* är klara. Rätt villkor är `EXISTS (… AND c.<embedding-kolumn> IS NULL)`.
+
+  Konsekvensen syntes när pipelinen kraschade mitt i ett dokument: de chunks som
+  hunnit få vektorer räckte för att hela dokumentet skulle betraktas som färdigt, och
+  resterande chunks kunde aldrig fyllas på utan `--tvinga`. Felet upptäcktes
+  2026-06-11 vid migreringen från VPS till lokal maskin, då 103 406 fi-embeddings
+  saknades efter restore.
+
+- **`fi_hamta_dokument` och `fi_hamta_lag` kunde inte begränsas och sprängde
+  MCP-protokollets storleksgräns.** Materialet innehåller de största dokumenten i hela
+  projektet: **75 dokument överskrider 1 000 000 tecken**, och det största har
+  4 756 447 tecken finsk text. Eftersom båda språkversionerna returnerades i samma svar
+  blev ett `fi_hamta_lag`-anrop mot det dokumentet **9 586 910 tecken** — drygt nio
+  gånger gränsen. Anropet misslyckades alltid, oavsett hur det formulerades.
+  Med standardtaket blir samma anrop 122 610 tecken.
+
+  Databasen lagrar fortfarande hela texten — trunkeringen gäller bara svaret till
+  anroparen, så `fi_sok_i_dokument` och den semantiska sökningen påverkas inte.
+
+### Bakgrund
+
+Genomför projektets svarskontrakt (`00-las-forst.md` → "Svarskontraktet — storlek,
+trunkering, adressering och sökning"). Additiva parametrar; inga schemaändringar.
 
 ## [1.1.0] — 2026-05-22
 

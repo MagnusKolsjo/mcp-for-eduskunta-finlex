@@ -19,9 +19,9 @@ Finlands tvåspråkiga lagstiftning finns på finska (`fin@`) och svenska (`swe@
 | `fi_sok` | Aggregerad sökning över Eduskunta och Finlex |
 | `fi_sok_eduskunta` | Strukturerad sökning i riksdagsdokument |
 | `fi_sok_finlex` | FTS och semantisk sökning i lokal Finlex-databas |
-| `fi_hamta_dokument` | Hämtar fulltext för ett riksdagsdokument via edktunnus eller riksdagsbeteckning |
+| `fi_hamta_dokument` | Hämtar fulltext för ett riksdagsdokument via edktunnus eller riksdagsbeteckning (`max_tecken`, `fran_tecken`) |
 | `fi_hamta_arende` | Hämtar ett riksdagsärende (valtiopäiväasia) med tillhörande dokument via ärendenummer |
-| `fi_hamta_lag` | Hämtar specifik lag eller proposition från Finlex via AKN URI, år+nummer eller ELI |
+| `fi_hamta_lag` | Hämtar specifik lag eller proposition från Finlex via AKN URI, år+nummer eller ELI (`max_tecken`, `fran_tecken`) |
 | `fi_hamta_aanestys` | Voteringsresultat för en specifik votering |
 | `fi_lista_vaalikaudet` | Valperioder och riksmöten (fr.o.m. 1907) |
 

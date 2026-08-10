@@ -1,4 +1,4 @@
--- schema_postgres.sql — PostgreSQL-schema för arbetsström 15 (Finland)
+-- schema_postgres.sql — PostgreSQL-schema för finsk riksdags- och rättsdata
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- Copyright (C) 2026 Magnus Kolsjö
 --
