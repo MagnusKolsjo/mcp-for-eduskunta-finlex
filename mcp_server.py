@@ -887,7 +887,9 @@ def fi_hamta_lag(
       nummer        — lagns nummer, t.ex. "123"
       hierarki      — "act" (lagar) | "doc" (propositioner, fördrag)
       typ           — "statute" | "statute-consolidated" | "government-proposal" |
-                      "treaty" | "authority-regulation"
+                      "treaty" | "authority-regulation". Med ar+nummer ger
+                      "statute-consolidated" den senaste konsoliderade lydelsen;
+                      "statute" ger lagen i ursprunglig lydelse.
       myndighetskod — krävs för authority-regulation, t.ex. "national-audit-office-of-finland"
 
     Svaret innehåller:
@@ -895,9 +897,10 @@ def fi_hamta_lag(
       fulltext_sv — svensk lagtext (för citat till användaren, None om saknas)
     """
     if akn_uri_fi:
-        # Parsa ar, nummer, hierarki, typ ur AKN URI
+        # Parsa ar, nummer, hierarki, typ ur AKN URI. Språkdelen kan bära en
+        # version efter @ (fin@20180817), så den sorteras bort på @-tecknet.
         stig = akn_uri_fi.replace(fx.API_BASE, "")
-        delar = [d for d in stig.split("/") if d and d not in ("akn", "fi") and not d.endswith("@")]
+        delar = [d for d in stig.split("/") if d and d not in ("akn", "fi") and "@" not in d]
         # delar = [hierarki, typ, (myndighetskod,) ar, nummer]
         if len(delar) >= 4:
             hierarki = delar[0]
@@ -912,10 +915,16 @@ def fi_hamta_lag(
                 nummer = delar[3]
         akn_uri_sv = fx.byt_sprak_i_uri(akn_uri_fi, fx.SPRAK_SV)
     elif ar is not None and nummer is not None:
-        def _bygg_uri(sprak_suffix: str) -> str:
+        # Konsoliderad lagtext finns i tidsversioner (fin@20180817 = lydelsen
+        # efter ändringslagen 2018/817). Den oversionerade adressen fin@ finns
+        # bara för lagar som aldrig ändrats; för övriga ger den 404. Finlex
+        # löser upp versionen "latest" till den senaste lydelsen.
+        version = "latest" if typ == "statute-consolidated" else ""
+
+        def _bygg_uri(sprak: str) -> str:
             if myndighetskod:
-                return f"{fx.API_BASE}/akn/fi/{hierarki}/{typ}/{myndighetskod}/{ar}/{nummer}/{sprak_suffix}"
-            return f"{fx.API_BASE}/akn/fi/{hierarki}/{typ}/{ar}/{nummer}/{sprak_suffix}"
+                return f"{fx.API_BASE}/akn/fi/{hierarki}/{typ}/{myndighetskod}/{ar}/{nummer}/{sprak}{version}"
+            return f"{fx.API_BASE}/akn/fi/{hierarki}/{typ}/{ar}/{nummer}/{sprak}{version}"
         akn_uri_fi = _bygg_uri("fin@")
         akn_uri_sv = _bygg_uri("swe@")
     else:
@@ -956,7 +965,21 @@ def fi_hamta_lag(
         log.debug("Svensk version saknas för %s/%s (%s) — kan saknas för enspråkiga lagar", ar, nummer, typ)
 
     if meta is None:
-        return {"fel": f"Dokument hittades inte: {ar}/{nummer} ({typ})"}
+        fel = f"Finlex har inget dokument {ar}/{nummer} av typen {typ}."
+        if typ == "statute-consolidated":
+            fel += (
+                " Alla lagar har inte konsoliderad lydelse i Finlex öppna data. "
+                'Prova typ="statute" för den ursprungliga lagtexten.'
+            )
+        return {"fel": fel}
+
+    # Ersätt "latest" med den version Finlex faktiskt levererade, så att
+    # cacheposten och svaret pekar på en bestämd lydelse.
+    eli = meta.get("eli") or ""
+    if akn_uri_fi.endswith("@latest") and eli.startswith("/akn/"):
+        faktisk = fx.API_BASE + eli
+        akn_uri_fi = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_FI)
+        akn_uri_sv = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_SV)
 
     # Spara i cache
     db.upsert_dokument(
