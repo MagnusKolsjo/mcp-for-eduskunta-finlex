@@ -141,6 +141,7 @@ def pg_init():
         with conn.cursor() as cur:
             cur.execute(sql_fil.read_text(encoding="utf-8"))
         conn.commit()
+    _migrera()
     log.info("PostgreSQL-schema finland initierat")
 
 
@@ -152,7 +153,40 @@ def sq_init():
     conn = _sq_anslutning()
     conn.executescript(sql_fil.read_text(encoding="utf-8"))
     conn.commit()
+    _migrera()
     log.info("SQLite-schema initierat")
+
+
+# Kolumner som tillkommit efter första publiceringen. Läggs till med
+# ADD COLUMN, aldrig i bas-schemat, så att befintliga databaser migreras.
+_TILLAGDA_KOLUMNER = {
+    "chunks": [
+        # Styckets position i dokumentets text per språk. Gör att en träff
+        # kan adresseras i en live-hämtad text utan att texten lagras lokalt.
+        ("tecken_start_fi", "INTEGER"),
+        ("tecken_slut_fi",  "INTEGER"),
+        ("tecken_start_sv", "INTEGER"),
+        ("tecken_slut_sv",  "INTEGER"),
+    ],
+}
+
+
+def _migrera():
+    """Lägger till kolumner som saknas. Idempotent; påverkar inga befintliga värden."""
+    for tabell, kolumner in _TILLAGDA_KOLUMNER.items():
+        if _ar_postgres():
+            with _cursor() as cur:
+                for namn, typ in kolumner:
+                    cur.execute(
+                        f"ALTER TABLE finland.{tabell} ADD COLUMN IF NOT EXISTS {namn} {typ}"
+                    )
+        else:
+            conn = _sq_anslutning()
+            finns = {r[1] for r in conn.execute(f"PRAGMA table_info({tabell})")}
+            for namn, typ in kolumner:
+                if namn not in finns:
+                    conn.execute(f"ALTER TABLE {tabell} ADD COLUMN {namn} {typ}")
+            conn.commit()
 
 
 def init_db():
@@ -420,6 +454,98 @@ def hamta_dokument_via_eduskuntatunnus(eduskuntatunnus: str) -> Optional[dict]:
 # FTS-sökning
 # ---------------------------------------------------------------------------
 
+# Fulltextindex på chunks. De skapas inte vid uppstart: på en befintlig
+# databas med miljontals chunks tar det lång tid, och uppstarten ska vara
+# snabb. De skapas av 03_chunka_och_embedda.py --bygg-index och av
+# 05_rensa_fulltext.py. Så länge de saknas söker FTS bara i dokument.
+CHUNK_FTS_INDEX = {
+    "fi": ("idx_finland_chunks_fts_fi", "finnish", "text_fi"),
+    "sv": ("idx_finland_chunks_fts_sv", "swedish", "text_sv"),
+}
+_chunk_fts_finns: dict[str, bool] = {}
+
+
+def har_chunk_fts(sprak: str) -> bool:
+    """True om fulltextindexet på chunks finns för språket (Postgres)."""
+    if not _ar_postgres():
+        return False
+    if _chunk_fts_finns.get(sprak):
+        return True
+    namn = CHUNK_FTS_INDEX[sprak][0]
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = 'finland' AND indexname = %s",
+            (namn,),
+        )
+        finns = cur.fetchone() is not None
+    # Bara ett positivt svar cachas; ett index som byggs senare ska märkas.
+    if finns:
+        _chunk_fts_finns[sprak] = True
+    return finns
+
+
+def skapa_chunk_fts_index() -> None:
+    """Skapar fulltextindexen på chunks om de saknas (tar tid på stora databaser)."""
+    for sprak, (namn, konfig, kol) in CHUNK_FTS_INDEX.items():
+        log.info("Skapar %s om det saknas...", namn)
+        with _cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {namn} ON finland.chunks "
+                f"USING GIN (to_tsvector('{konfig}', coalesce({kol}, '')))"
+            )
+
+
+def spara_chunks(dok_id: int, chunks: list[dict], embeddings, sprak: str) -> None:
+    """
+    Sparar ett språks chunks med embedding och offsets för ett dokument.
+
+    Befintliga rader för samma dokument_id och chunk_index uppdateras bara i
+    det här språkets kolumner; det andra språkets text och vektor lämnas.
+    Kräver Postgres med pgvector.
+    """
+    s = "fi" if sprak == "fi" else "sv"
+    with _cursor() as cur:
+        cur.execute(
+            f"UPDATE finland.chunks SET embedding_{s} = NULL WHERE dokument_id = %s",
+            (dok_id,),
+        )
+        for ch, emb in zip(chunks, embeddings):
+            vec_str = "[" + ",".join(str(float(x)) for x in emb) + "]"
+            cur.execute(
+                f"""
+                INSERT INTO finland.chunks
+                    (dokument_id, chunk_index, text_{s}, embedding_{s},
+                     tecken_start_{s}, tecken_slut_{s})
+                VALUES (%s, %s, %s, %s::vector, %s, %s)
+                ON CONFLICT (dokument_id, chunk_index) DO UPDATE SET
+                    text_{s}         = EXCLUDED.text_{s},
+                    embedding_{s}    = EXCLUDED.embedding_{s},
+                    tecken_start_{s} = EXCLUDED.tecken_start_{s},
+                    tecken_slut_{s}  = EXCLUDED.tecken_slut_{s}
+                """,
+                (dok_id, ch["chunk_index"], ch["text"], vec_str,
+                 ch.get("tecken_start"), ch.get("tecken_slut")),
+            )
+
+
+def antal_chunks_med_embedding(dok_id: int, sprak: str) -> int:
+    """Antal chunks med embedding på språket för ett dokument (Postgres)."""
+    s = "fi" if sprak == "fi" else "sv"
+    with _cursor() as cur:
+        cur.execute(
+            f"SELECT count(*) FROM finland.chunks WHERE dokument_id = %s AND embedding_{s} IS NOT NULL",
+            (dok_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def rensa_fulltext(dok_id: int, sprak: str) -> None:
+    """Tar bort ett språks råtext ur dokument när texten finns som chunks."""
+    kol = "fulltext_fi" if sprak == "fi" else "fulltext_sv"
+    with _cursor() as cur:
+        cur.execute(f"UPDATE {_prefix()}dokument SET {kol} = NULL WHERE id = {_ph()}", (dok_id,))
+
+
 def fts_sok(
     fraga: str,
     sprak: str = "fi",
@@ -445,55 +571,77 @@ def fts_sok(
 
 
 def _pg_fts_sok(termer, sprak, kalla_filter, typ_filter, ar_filter, max_treff) -> list[dict]:
-    """FTS via to_tsquery med finsk/svensk konfiguration."""
+    """
+    FTS via to_tsquery med finsk/svensk konfiguration.
+
+    Söker i dokumentets titel och eventuell lagrad råtext, och i chunks när
+    fulltextindexet på chunks finns. Dokument vars råtext rensats hittas då
+    via sina chunks; varje dokument får sin bästa rank från någon av delarna.
+    """
     pg_sprak  = "finnish" if sprak == "fi" else "swedish"
     text_kol  = "fulltext_fi" if sprak == "fi" else "fulltext_sv"
     titel_kol = "titel_fi"   if sprak == "fi" else "titel_sv"
+    chunk_kol = "text_fi"    if sprak == "fi" else "text_sv"
 
     tsquery_delar = " || ".join(
         [f"plainto_tsquery('{pg_sprak}', %s)"] * len(termer)
     )
 
-    villkor  = []
-    params   = list(termer)  # för tsquery-CTE
-
+    villkor: list[str] = []
+    filter_params: list = []
     if kalla_filter:
-        villkor.append("kalla = %s")
-        params.append(kalla_filter)
+        villkor.append("d.kalla = %s")
+        filter_params.append(kalla_filter)
     if typ_filter:
-        villkor.append("typ = %s")
-        params.append(typ_filter)
+        villkor.append("d.typ = %s")
+        filter_params.append(typ_filter)
     if ar_filter:
-        villkor.append("ar = %s")
-        params.append(ar_filter)
-
+        villkor.append("d.ar = %s")
+        filter_params.append(ar_filter)
     where_extra = ("AND " + " AND ".join(villkor)) if villkor else ""
-    rank_params = list(termer) + params[len(termer):] + [max_treff]
+
+    dok_vektor = (
+        f"to_tsvector('{pg_sprak}', "
+        f"coalesce(d.{titel_kol},'') || ' ' || coalesce(d.{text_kol},''))"
+    )
+    delar = [f"""
+        SELECT d.id, ts_rank_cd({dok_vektor}, q.tsq) AS rank
+        FROM   finland.dokument d, q
+        WHERE  {dok_vektor} @@ q.tsq {where_extra}
+    """]
+    params = list(termer) + filter_params
+
+    if har_chunk_fts(sprak):
+        # Uttrycket måste vara identiskt med indexets för att indexet används.
+        chunk_vektor = f"to_tsvector('{pg_sprak}', coalesce(c.{chunk_kol}, ''))"
+        delar.append(f"""
+            SELECT c.dokument_id AS id, ts_rank_cd({chunk_vektor}, q.tsq) AS rank
+            FROM   finland.chunks c
+            JOIN   finland.dokument d ON d.id = c.dokument_id, q
+            WHERE  {chunk_vektor} @@ q.tsq {where_extra}
+        """)
+        params += filter_params
 
     sql = f"""
-        WITH q AS (
-            SELECT {tsquery_delar} AS tsq
+        WITH q AS (SELECT {tsquery_delar} AS tsq),
+        traffar AS (
+            SELECT id, max(rank) AS rank
+            FROM ({" UNION ALL ".join(delar)}) x
+            GROUP BY id
         )
         SELECT
             d.id, d.edk_id, d.eduskuntatunnus_fi, d.eduskuntatunnus_sv,
             d.kalla, d.typ, d.{titel_kol} AS titel,
-            d.ar, d.datum, d.akn_uri_fi,
-            ts_rank_cd(
-                to_tsvector('{pg_sprak}',
-                    coalesce(d.{titel_kol},'') || ' ' || coalesce(d.{text_kol},'')),
-                q.tsq
-            ) AS rank
-        FROM   finland.dokument d, q
-        WHERE  to_tsvector('{pg_sprak}',
-                   coalesce(d.{titel_kol},'') || ' ' || coalesce(d.{text_kol},''))
-               @@ q.tsq
-        {where_extra}
-        ORDER  BY rank DESC, d.datum DESC NULLS LAST
+            d.ar, d.datum, d.akn_uri_fi, t.rank
+        FROM   traffar t
+        JOIN   finland.dokument d ON d.id = t.id
+        ORDER  BY t.rank DESC, d.datum DESC NULLS LAST
         LIMIT  %s
     """
+    params.append(max_treff)
 
     with _cursor() as cur:
-        cur.execute(sql, rank_params)
+        cur.execute(sql, params)
         rader = cur.fetchall()
 
     return [
@@ -669,9 +817,10 @@ def vektor_sok_i_dokument(
     if not _ar_postgres():
         return {"fel": "Semantisk sökning kräver PostgreSQL med pgvector — SQLite-läge stöds inte."}
 
-    emb_kol   = "embedding_fi" if sprak == "fi" else "embedding_sv"
-    text_kol  = "text_fi"      if sprak == "fi" else "text_sv"
-    titel_kol = "titel_fi"     if sprak == "fi" else "titel_sv"
+    emb_kol    = "embedding_fi" if sprak == "fi" else "embedding_sv"
+    text_kol   = "text_fi"      if sprak == "fi" else "text_sv"
+    titel_kol  = "titel_fi"     if sprak == "fi" else "titel_sv"
+    sprak_kort = "fi"           if sprak == "fi" else "sv"
 
     # Hämta dokumentmetadata och räkna chunks
     with _pg_anslutning() as conn:
@@ -721,7 +870,8 @@ def vektor_sok_i_dokument(
                 cur.execute(
                     f"""SELECT chunk_index,
                                {text_kol} AS text,
-                               1 - (c.{emb_kol} <=> %s::vector) AS likhet
+                               1 - (c.{emb_kol} <=> %s::vector) AS likhet,
+                               c.tecken_start_{sprak_kort}, c.tecken_slut_{sprak_kort}
                         FROM   finland.chunks c
                         WHERE  c.dokument_id = %s
                           AND  c.{emb_kol} IS NOT NULL
@@ -731,9 +881,11 @@ def vektor_sok_i_dokument(
                 )
                 traffar = [
                     {
-                        "chunk_index": r[0],
-                        "text":        r[1],
-                        "likhet":      round(float(r[2]), 4) if r[2] is not None else 0.0,
+                        "chunk_index":  r[0],
+                        "text":         r[1],
+                        "likhet":       round(float(r[2]), 4) if r[2] is not None else 0.0,
+                        "tecken_start": r[3],
+                        "tecken_slut":  r[4],
                     }
                     for r in cur.fetchall()
                 ]

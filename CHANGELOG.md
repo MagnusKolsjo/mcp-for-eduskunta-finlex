@@ -30,6 +30,17 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 - `fi_hamta_aanestys` och serverns instruktioner anger att Eduskunta Public API har
   voteringar fr.o.m. 2008-10-17.
 
+### Tillagt
+
+- **Smal lokal cache för Finlex.** Chunks sparar nu sin position i texten
+  (`tecken_start_fi/_sv`, `tecken_slut_fi/_sv`; nya kolumner läggs till vid uppstart).
+  `03_chunka_och_embedda.py --bygg-index` skapar också fulltextindex på chunks, och när
+  de finns tar skriptet bort dokumentets råtext ur `finland.dokument` så snart ett språk
+  är chunkat och embeddat (`--behall-fulltext` stänger av det). FTS i `fi_sok` och
+  `fi_sok_finlex` söker då i chunks; utan indexen fungerar sökningen som förut.
+  Saknas råtexten hämtar skriptet texten live från källan, så dokument kan chunkas om.
+  Chunkningen ligger i `chunkning.py` och live-hämtningen i `texthamtning.py`.
+
 ### Fixat
 
 - **`03_chunka_och_embedda.py` embeddade aldrig nya dokument.** Urvalet krävde en

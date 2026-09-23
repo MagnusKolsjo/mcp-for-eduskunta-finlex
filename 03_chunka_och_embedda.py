@@ -5,15 +5,22 @@
 """
 03_chunka_och_embedda.py — Chunkning och embedding för finsk riksdags- och rättsdata
 
-Läser fulltext_fi och fulltext_sv från finland.dokument, delar upp i stycken
-och genererar vektorer med två språkspecifika modeller:
+Läser dokumentens text, delar upp i stycken och genererar vektorer med två
+språkspecifika modeller. Texten tas ur fulltext_fi/fulltext_sv när synken
+lagrat den, annars hämtas den live från Finlex eller Eduskunta:
 
   Finska:  TurkuNLP/sbert-cased-finnish-paraphrase (768 dim) → embedding_fi
   Svenska: KBLab/sentence-bert-swedish-cased       (768 dim) → embedding_sv
 
 Vektorerna lagras i finland.chunks med kolumnerna text_fi/embedding_fi och
 text_sv/embedding_sv. Om ett dokument har båda språkversionerna (t.ex. Finlex-
-lagar) sparas de i samma chunk-rad med alignerat chunk_index.
+lagar) sparas de i samma chunk-rad med alignerat chunk_index. Varje chunk får
+också sin position i texten (tecken_start/tecken_slut per språk).
+
+Smal cache: när fulltextindexen på chunks finns (--bygg-index) tas råtexten
+bort ur finland.dokument så snart ett språk är chunkat och embeddat. Texten
+finns då kvar som chunks för sökning och hämtas live när den ska läsas.
+--behall-fulltext stänger av det.
 
 Kräver PostgreSQL + pgvector — SQLite-alternativet saknar vektorsökning.
 
@@ -24,13 +31,13 @@ Användning:
   python3 03_chunka_och_embedda.py --sprak fi         # Bara finska embeddings
   python3 03_chunka_och_embedda.py --sprak sv         # Bara svenska embeddings
   python3 03_chunka_och_embedda.py --tvinga           # Återskapa befintliga chunks
-  python3 03_chunka_och_embedda.py --bygg-index       # Bygg IVFFlat-index efteråt
+  python3 03_chunka_och_embedda.py --bygg-index       # Bygg IVFFlat- och FTS-index efteråt
+  python3 03_chunka_och_embedda.py --behall-fulltext  # Behåll råtexten i dokument
 """
 
 import argparse
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -40,6 +47,8 @@ _SCRIPT_DIR = Path(__file__).parent.resolve()
 load_dotenv(_SCRIPT_DIR / ".env")
 
 sys.path.insert(0, str(_SCRIPT_DIR))
+
+from chunkning import chunka_text  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,13 +61,14 @@ log = logging.getLogger(__name__)
 
 EMBEDDING_MODEL_FI = os.getenv("EMBEDDING_MODEL_FI", "TurkuNLP/sbert-cased-finnish-paraphrase")
 EMBEDDING_MODEL_SV = os.getenv("EMBEDDING_MODEL_SV", "KBLab/sentence-bert-swedish-cased")
-CHUNK_MAX_TECKEN     = int(os.getenv("CHUNK_MAX_TECKEN",           "800"))
-CHUNK_MIN_TECKEN     = int(os.getenv("CHUNK_MIN_TECKEN",           "100"))
-CHUNK_OVERLAP_TECKEN = int(os.getenv("CHUNK_OVERLAP_TECKEN",       "200"))
 EMBEDDING_BATCH    = int(os.getenv("EMBEDDING_BATCH_STORLEK",  "32"))
 
 _modell_fi = None
 _modell_sv = None
+
+# Sätts av --behall-fulltext. Råtexten tas bara bort när fulltextindexet på
+# chunks finns; annars skulle dokumentet försvinna ur FTS-sökningen.
+_RENSA_FULLTEXT = True
 
 
 # ---------------------------------------------------------------------------
@@ -106,108 +116,6 @@ def _hamta_modell(sprak: str):
 # Chunkning
 # ---------------------------------------------------------------------------
 
-def chunka_text(text: str) -> list[dict]:
-    """
-    Delar upp text i stycken på ~CHUNK_MAX_TECKEN tecken med CHUNK_OVERLAP_TECKEN
-    tecken bakåtöverlapp mellan intilliggande chunks.
-
-    Splittningsstrategi (i fallande prioritet):
-      1. Paragrafrubriker (###) — naturliga gränser i AKN-extraherad text
-      2. Dubbla radbrytningar (styckebrytning)
-      3. Meningsgränser (. ? !) om stycket fortfarande är för långt
-      4. Hårt snitt på CHUNK_MAX_TECKEN om inget bättre alternativ finns
-
-    Överlapp: varje chunk inleds med de sista CHUNK_OVERLAP_TECKEN tecknen från
-    föregående stycke så att kontexten bevaras vid chunkgränser.
-
-    Returnerar lista med dicts:
-      {chunk_index, text, tecken_start, tecken_slut}
-    tecken_start/slut pekar på det primära styckets position i originaltexten
-    (överlappstexten är inte medräknad i positionerna).
-    """
-    if not text:
-        return []
-
-    # Steg 1: dela på §-/kapitelrubriker
-    delar = re.split(r"(?=\n###\s)", text)
-
-    stycken: list[str] = []
-    for del_ in delar:
-        del_ = del_.strip()
-        if not del_:
-            continue
-        if len(del_) <= CHUNK_MAX_TECKEN:
-            stycken.append(del_)
-        else:
-            # Dela ytterligare på dubbla radbrytningar
-            understycken = re.split(r"\n{2,}", del_)
-            nuvarande = ""
-            for us in understycken:
-                us = us.strip()
-                if not us:
-                    continue
-                if len(nuvarande) + len(us) + 2 <= CHUNK_MAX_TECKEN:
-                    nuvarande = (nuvarande + "\n\n" + us).strip() if nuvarande else us
-                else:
-                    if nuvarande:
-                        stycken.append(nuvarande)
-                    if len(us) > CHUNK_MAX_TECKEN:
-                        # Dela på meningsgränser
-                        meningar = re.split(r"(?<=[.?!])\s+", us)
-                        nuvarande = ""
-                        for m in meningar:
-                            if len(nuvarande) + len(m) + 1 <= CHUNK_MAX_TECKEN:
-                                nuvarande = (nuvarande + " " + m).strip() if nuvarande else m
-                            else:
-                                if nuvarande:
-                                    stycken.append(nuvarande)
-                                # Hårt snitt om meningen är för lång
-                                while len(m) > CHUNK_MAX_TECKEN:
-                                    stycken.append(m[:CHUNK_MAX_TECKEN])
-                                    m = m[CHUNK_MAX_TECKEN:]
-                                nuvarande = m
-                        if nuvarande:
-                            stycken.append(nuvarande)
-                            nuvarande = ""
-                    else:
-                        nuvarande = us
-            if nuvarande:
-                stycken.append(nuvarande)
-
-    # Bygg chunks med positionsinfo och bakåtöverlapp
-    chunks          = []
-    pos             = 0
-    index           = 0
-    foregaende_text = ""
-    for s in stycken:
-        s = s.strip()
-        if len(s) < CHUNK_MIN_TECKEN:
-            continue
-
-        # Bakåtöverlapp: inled med slutet av föregående stycke för bättre
-        # kontexttäckning vid chunkgränser (t.ex. lagparagrafer som hänvisar bakåt)
-        if foregaende_text and CHUNK_OVERLAP_TECKEN > 0:
-            overlapp   = foregaende_text[-CHUNK_OVERLAP_TECKEN:]
-            chunk_text = overlapp + "\n\n" + s
-        else:
-            chunk_text = s
-
-        idx   = text.find(s[:40], pos)
-        start = idx if idx >= 0 else pos
-        slut  = start + len(s)
-        chunks.append({
-            "chunk_index":  index,
-            "text":         chunk_text,
-            "tecken_start": start,
-            "tecken_slut":  slut,
-        })
-        pos             = max(pos, slut)
-        index          += 1
-        foregaende_text = s
-
-    return chunks
-
-
 # ---------------------------------------------------------------------------
 # Databas — hämtning
 # ---------------------------------------------------------------------------
@@ -230,10 +138,17 @@ def _hamta_dokument_att_embeda(
     text_kol  = "fulltext_fi" if sprak == "fi" else "fulltext_sv"
     emb_kol   = "embedding_fi" if sprak == "fi" else "embedding_sv"
 
-    villkor_delar = [
-        f"d.{text_kol} IS NOT NULL",
-        f"d.{text_kol} != ''",
-    ]
+    if tvinga:
+        # Omchunkning går även för dokument vars råtext rensats; texten
+        # hämtas då live via akn-URI eller edk_id.
+        villkor_delar = [
+            f"(coalesce(d.{text_kol}, '') <> '' OR d.akn_uri_fi IS NOT NULL OR d.edk_id IS NOT NULL)"
+        ]
+    else:
+        villkor_delar = [
+            f"d.{text_kol} IS NOT NULL",
+            f"d.{text_kol} != ''",
+        ]
 
     if not tvinga:
         # Två fall ska med: dokument som aldrig chunkats för språket (inga
@@ -295,66 +210,38 @@ def _hamta_dokument_att_embeda(
 
 
 def _hamta_fulltext(dok_id: int, sprak: str) -> str | None:
-    """Hämtar fulltext_fi eller fulltext_sv för ett dokument."""
+    """
+    Dokumentets text på språket: lagrad råtext om den finns, annars live.
+
+    Live-hämtningen gör att dokument vars råtext rensats kan chunkas om.
+    """
+    import psycopg2.extras
     from db import pg_anslutning, pg_returnera
+    import texthamtning
 
     text_kol = "fulltext_fi" if sprak == "fi" else "fulltext_sv"
     conn = pg_anslutning()
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                f"SELECT {text_kol} FROM finland.dokument WHERE id = %s",
+                f"""SELECT {text_kol} AS text, kalla, edk_id, eduskuntatunnus_fi,
+                           eduskuntatunnus_sv, akn_uri_fi, akn_uri_sv
+                    FROM finland.dokument WHERE id = %s""",
                 (dok_id,),
             )
             rad = cur.fetchone()
     finally:
         pg_returnera(conn)
-    return rad[0] if rad else None
+    if not rad:
+        return None
+    if rad["text"]:
+        return rad["text"]
+    return texthamtning.dokumenttext(dict(rad), sprak)
 
 
 # ---------------------------------------------------------------------------
 # Databas — sparning
 # ---------------------------------------------------------------------------
-
-def _spara_chunks(dok_id: int, chunks: list[dict], embeddings, sprak: str):
-    """
-    Sparar chunks med embeddings för ett språk.
-
-    Om en chunk-rad redan finns (samma dokument_id + chunk_index) uppdateras
-    den med det nya språkets text och embedding — de befintliga kolumnerna
-    för det andra språket berörs inte.
-    """
-    from db import pg_anslutning, pg_returnera
-
-    text_kol = "text_fi" if sprak == "fi" else "text_sv"
-    emb_kol  = "embedding_fi" if sprak == "fi" else "embedding_sv"
-
-    conn = pg_anslutning()
-    try:
-        with conn.cursor() as cur:
-            # Ta bort gamla embeddings för det här språket (men behåll det andra språkets data)
-            cur.execute(
-                f"UPDATE finland.chunks SET {emb_kol} = NULL WHERE dokument_id = %s",
-                (dok_id,)
-            )
-
-            for ch, emb in zip(chunks, embeddings):
-                vec_str = "[" + ",".join(str(float(x)) for x in emb) + "]"
-                cur.execute(
-                    f"""
-                    INSERT INTO finland.chunks
-                        (dokument_id, chunk_index, {text_kol}, {emb_kol})
-                    VALUES (%s, %s, %s, %s::vector)
-                    ON CONFLICT (dokument_id, chunk_index) DO UPDATE SET
-                        {text_kol} = EXCLUDED.{text_kol},
-                        {emb_kol}  = EXCLUDED.{emb_kol}
-                    """,
-                    (dok_id, ch["chunk_index"], ch["text"], vec_str),
-                )
-        conn.commit()
-    finally:
-        pg_returnera(conn)
-
 
 # ---------------------------------------------------------------------------
 # Embedding av ett dokument
@@ -398,7 +285,10 @@ def embeda_dokument(dok_id: int, titel_fi: str | None, titel_sv: str | None, spr
         os.close(save_fd1)
         os.close(log_fd)
 
-    _spara_chunks(dok_id, chunks, embeddings, sprak)
+    import db
+    db.spara_chunks(dok_id, chunks, embeddings, sprak)
+    if _RENSA_FULLTEXT and db.har_chunk_fts(sprak):
+        db.rensa_fulltext(dok_id, sprak)
     return len(chunks)
 
 
@@ -527,6 +417,9 @@ def bygg_ivfflat_index(lists: int = 100):
         pg_returnera(conn)
 
     log.info("IVFFlat-index klara.")
+    import db
+    db.skapa_chunk_fts_index()
+    log.info("Fulltextindex på chunks klara.")
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +455,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bygg-index",
         action="store_true",
-        help="Bygg IVFFlat-index för embedding_fi och embedding_sv efter embedding",
+        help="Bygg IVFFlat-index och fulltextindex på chunks efter embedding",
+    )
+    parser.add_argument(
+        "--behall-fulltext",
+        action="store_true",
+        help="Behåll dokumentens råtext i finland.dokument efter chunkning",
     )
     parser.add_argument(
         "--lists",
@@ -579,6 +477,7 @@ if __name__ == "__main__":
         log.error("Databasinitiering misslyckades: %s", exc)
         sys.exit(1)
 
+    _RENSA_FULLTEXT = not args.behall_fulltext
     kalla_arg = None if args.kalla == "alla" else args.kalla
     stat = kor_embedding(kalla=kalla_arg, sprak=args.sprak, tvinga=args.tvinga)
 
