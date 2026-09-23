@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -39,7 +40,11 @@ _SCRIPT_DIR  = Path(__file__).parent.resolve()
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///finland_cache.db")
 
 _pg_pool = None
-_sq_conn = None
+_pg_pool_lock = threading.Lock()
+# En SQLite-anslutning per tråd. Verktygen körs på arbetstrådar, och en
+# delad anslutning skulle blanda ihop trådarnas transaktioner: en commit
+# eller rollback i en tråd gäller då även den andras halvfärdiga skrivning.
+_sq_lokal = threading.local()
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +73,10 @@ def _pg_hamta_pool():
     """Skapar och returnerar ThreadedConnectionPool för PostgreSQL (lazy init)."""
     global _pg_pool
     if _pg_pool is None:
-        import psycopg2.pool
-        _pg_pool = psycopg2.pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
+        with _pg_pool_lock:
+            if _pg_pool is None:
+                import psycopg2.pool
+                _pg_pool = psycopg2.pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
     return _pg_pool
 
 
@@ -104,16 +111,17 @@ def pg_returnera(conn):
 # ---------------------------------------------------------------------------
 
 def _sq_anslutning():
-    """Returnerar en aktiv SQLite-anslutning (singleton per process)."""
-    global _sq_conn
-    if _sq_conn is None:
+    """Returnerar trådens SQLite-anslutning; öppnas vid första användningen."""
+    conn = getattr(_sq_lokal, "conn", None)
+    if conn is None:
         db_sokvag = DATABASE_URL.replace("sqlite:///", "")
         if not Path(db_sokvag).is_absolute():
             db_sokvag = str(_SCRIPT_DIR / db_sokvag)
-        _sq_conn = sqlite3.connect(db_sokvag, check_same_thread=False)
-        _sq_conn.row_factory = sqlite3.Row
-        _sq_conn.execute("PRAGMA journal_mode=WAL")
-    return _sq_conn
+        conn = sqlite3.connect(db_sokvag, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        _sq_lokal.conn = conn
+    return conn
 
 
 # Bakåtkompatibelt alias
@@ -165,7 +173,7 @@ def _hamta_db():
     """
     Kontexthanterare som ger rätt databasanslutning per backend.
     PostgreSQL: hämtar från pool och återlämnar automatiskt.
-    SQLite: returnerar singletonen.
+    SQLite: returnerar trådens egen anslutning.
     """
     if _ar_postgres():
         with _pg_anslutning() as conn:
@@ -179,7 +187,7 @@ def _cursor():
     """
     Kontexthanterare som ger en databasmarkör och committar/rollbackar.
     PostgreSQL: hämtar anslutning ur poolen, återlämnar i finally.
-    SQLite: återanvänder singleton-anslutningen.
+    SQLite: återanvänder trådens egen anslutning.
     """
     if _ar_postgres():
         with _pg_anslutning() as conn:

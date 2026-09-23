@@ -27,6 +27,7 @@ API-dokumentation: https://api.eduskunta.fi
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,7 @@ USER_AGENT = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp
 # Token-bucket för rate-limiting
 _bucket_tokens  = float(RATE_LIMIT)
 _bucket_last_ts = time.monotonic()
+_bucket_lock    = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -53,18 +55,23 @@ _bucket_last_ts = time.monotonic()
 # ---------------------------------------------------------------------------
 
 def _throttle():
+    # Verktygen körs på flera arbetstrådar och synken med trådpool; utan lås
+    # kan två trådar läsa samma saldo och båda släppas igenom. Låset hålls
+    # även under väntan, så att anropen köar i stället för att rusa samtidigt.
     global _bucket_tokens, _bucket_last_ts
-    now     = time.monotonic()
-    elapsed = now - _bucket_last_ts
-    _bucket_tokens  = min(RATE_LIMIT, _bucket_tokens + elapsed * (RATE_LIMIT / 60.0))
-    _bucket_last_ts = now
-    if _bucket_tokens < 1:
-        sleep_s = (1 - _bucket_tokens) / (RATE_LIMIT / 60.0)
-        log.debug("Rate-limit nådd, väntar %.1f s", sleep_s)
-        time.sleep(sleep_s)
-        _bucket_tokens = 0.0
-    else:
-        _bucket_tokens -= 1.0
+    with _bucket_lock:
+        now     = time.monotonic()
+        elapsed = now - _bucket_last_ts
+        _bucket_tokens  = min(RATE_LIMIT, _bucket_tokens + elapsed * (RATE_LIMIT / 60.0))
+        _bucket_last_ts = now
+        if _bucket_tokens < 1:
+            sleep_s = (1 - _bucket_tokens) / (RATE_LIMIT / 60.0)
+            log.debug("Rate-limit nådd, väntar %.1f s", sleep_s)
+            time.sleep(sleep_s)
+            _bucket_tokens  = 0.0
+            _bucket_last_ts = time.monotonic()
+        else:
+            _bucket_tokens -= 1.0
 
 
 def _headers() -> dict:
