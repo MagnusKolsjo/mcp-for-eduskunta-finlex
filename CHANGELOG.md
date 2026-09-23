@@ -32,6 +32,9 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   ändrats. Adressen byggs nu med Finlex version `latest`, och svaret och cacheposten får
   den version som levererades. Saknas konsoliderad lydelse föreslår felet `typ="statute"`.
 - `fi_hamta_lag` med en versionerad AKN-URI tolkade versionen som myndighetskod.
+- `fi_hamta_lag` sade att dokumentet inte fanns när Finlex svarade med 5xx, timeout
+  eller nätverksfel. Bara 404 tolkas nu som "finns inte"; övriga fel ger ett
+  meddelande om att Finlex inte svarar. Synkskripten hoppar som förut över sådana poster.
 - `fi_hamta_dokument` via `eduskuntatunnus` tog med söksvarets fulltext i `metadata`;
   ett svar med `max_tecken=1500` blev drygt 326 000 tecken.
 - Historiksynken avbröt tidigare tyst vid fel och rapporterade körningen som lyckad.

@@ -1112,7 +1112,15 @@ def fi_hamta_lag(
         }
 
     # Hämta finska versionen
-    rot_fi = fx.hamta_akn_dokument(akn_uri_fi)
+    def _hamta(uri: str):
+        try:
+            return fx.hamta_akn_dokument(uri, strikt=True)
+        except fx.FinlexOtillganglig as exc:
+            raise ToolError(
+                f"Finlex svarar inte ({exc}). Dokumentet kan finnas; försök igen senare."
+            ) from exc
+
+    rot_fi = _hamta(akn_uri_fi)
     meta      = None
     fulltext_fi = None
     fulltext_sv = None
@@ -1124,7 +1132,7 @@ def fi_hamta_lag(
         log.warning("Finsk version saknas för %s/%s (%s)", ar, nummer, typ)
 
     # Hämta svenska versionen
-    rot_sv = fx.hamta_akn_dokument(akn_uri_sv)
+    rot_sv = _hamta(akn_uri_sv)
     if rot_sv is not None:
         if meta is None:
             meta = fx.parsad_akn_metadata(rot_sv)

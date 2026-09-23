@@ -114,8 +114,25 @@ def _get_json(url: str, params: Optional[dict] = None, max_forsok: int = 3) -> d
     raise RuntimeError(f"Max försök nådd för {url}")
 
 
-def _get_xml(url: str, params: Optional[dict] = None, max_forsok: int = 3) -> Optional[etree._Element]:
-    """GET med XML-svar, returnerar lxml-rot eller None vid 404."""
+class FinlexOtillganglig(RuntimeError):
+    """Finlex svarade inte (5xx, timeout, nätverksfel) — skilt från att dokumentet saknas."""
+
+
+def _get_xml(
+    url: str,
+    params: Optional[dict] = None,
+    max_forsok: int = 3,
+    strikt: bool = False,
+) -> Optional[etree._Element]:
+    """
+    GET med XML-svar, returnerar lxml-rot eller None vid 404.
+
+    Andra fel prövas max_forsok gånger. Därefter returneras None om strikt
+    är False (synkskripten hoppar då över posten), annars kastas
+    FinlexOtillganglig, så att den som svarar en användare kan skilja
+    "finns inte" från "källan svarar inte".
+    """
+    senaste_fel = "okänt fel"
     for forsok in range(max_forsok):
         _throttle()
         try:
@@ -131,16 +148,22 @@ def _get_xml(url: str, params: Optional[dict] = None, max_forsok: int = 3) -> Op
             if r.status_code == 429:
                 vantetid = 60 * (forsok + 1)
                 log.warning("429 från Finlex — väntar %d s", vantetid)
+                senaste_fel = "HTTP 429 (för många anrop)"
                 time.sleep(vantetid)
                 continue
             r.raise_for_status()
             return etree.fromstring(r.content)
-        except Exception as exc:
-            if forsok < max_forsok - 1:
-                time.sleep(5 * (forsok + 1))
-                continue
-            log.error("XML-hämtning misslyckades för %s: %s", url, exc)
-            return None
+        except httpx.HTTPStatusError as exc:
+            senaste_fel = f"HTTP {exc.response.status_code}"
+        except httpx.HTTPError as exc:
+            senaste_fel = f"{type(exc).__name__}: {exc}"
+        except etree.XMLSyntaxError as exc:
+            senaste_fel = f"svaret är inte giltig XML ({exc})"
+        if forsok < max_forsok - 1:
+            time.sleep(5 * (forsok + 1))
+    log.error("XML-hämtning misslyckades för %s: %s", url, senaste_fel)
+    if strikt:
+        raise FinlexOtillganglig(senaste_fel)
     return None
 
 
@@ -254,12 +277,13 @@ def bygg_akn_url(
     return f"{API_BASE}/akn/fi/{hierarki}/{typ}/{ar}/{nummer}/{sprak}"
 
 
-def hamta_akn_dokument(akn_uri: str) -> Optional[etree._Element]:
+def hamta_akn_dokument(akn_uri: str, strikt: bool = False) -> Optional[etree._Element]:
     """
     Hämtar ett enskilt AKN-dokument direkt via dess URI.
-    Returnerar lxml-rotelementet, eller None om 404.
+    Returnerar lxml-rotelementet, eller None om 404. Med strikt=True kastas
+    FinlexOtillganglig när Finlex inte svarar, i stället för None.
     """
-    return _get_xml(akn_uri)
+    return _get_xml(akn_uri, strikt=strikt)
 
 
 def hamta_ar(
