@@ -236,11 +236,23 @@ def _hamta_dokument_att_embeda(
     ]
 
     if not tvinga:
+        # Två fall ska med: dokument som aldrig chunkats för språket (inga
+        # rader med språkets text) och dokument där en körning avbröts mitt i
+        # (rader med text men utan embedding). Rader som bara bär det andra
+        # språkets text räknas inte; de saknar alltid det här språkets vektor.
+        text_c = "text_fi" if sprak == "fi" else "text_sv"
         villkor_delar.append(f"""
-            EXISTS (
-                SELECT 1 FROM finland.chunks c
-                WHERE c.dokument_id = d.id
-                  AND c.{emb_kol} IS NULL
+            (
+                NOT EXISTS (
+                    SELECT 1 FROM finland.chunks c
+                    WHERE c.dokument_id = d.id AND c.{text_c} IS NOT NULL
+                )
+                OR EXISTS (
+                    SELECT 1 FROM finland.chunks c
+                    WHERE c.dokument_id = d.id
+                      AND c.{text_c} IS NOT NULL
+                      AND c.{emb_kol} IS NULL
+                )
             )
         """)
 

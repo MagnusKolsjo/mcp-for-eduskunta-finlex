@@ -32,6 +32,11 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Fixat
 
+- **`03_chunka_och_embedda.py` embeddade aldrig nya dokument.** Urvalet krävde en
+  befintlig chunk-rad utan embedding, så dokument utan några chunks alls valdes aldrig
+  (utan `--tvinga`). Den dagliga synken lade alltså till dokument som aldrig blev
+  sökbara semantiskt; i en driftdatabas saknade 612 dokument finska och 2 779 svenska
+  chunks. Urvalet tar nu med både ochunkade och halvfärdiga dokument per språk.
 - **`fi_hamta_lag` med `ar`+`nummer` och `typ="statute-consolidated"` gav 404 för
   ändrade lagar**, t.ex. grundlagen 731/1999. Konsoliderad lagtext finns i tidsversioner
   (`fin@20180817`); den oversionerade adressen `fin@` finns bara för lagar som aldrig
