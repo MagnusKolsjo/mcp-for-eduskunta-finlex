@@ -44,6 +44,8 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 - Historiksynkens `resultat` kunde motsäga rösttalen: saknade tal räknades som 0 och
   sammanslagningen behöll resultatet från den ena raden. Resultatet räknas nu om ur de
   sammanslagna `ja_roster`/`nej_roster` och lämnas tomt när något tal saknas.
+- Historiksynken med `--fran-sida` förbi sista sidan gav exitkod 1 som om källan vore
+  nedstängd. En tom startsida tolkas nu som "inget nytt" så länge sida 1 har rader.
 - Trådsäkerhet: lås kring lat inläsning av de två embeddingmodellerna, kring
   tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
   anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att

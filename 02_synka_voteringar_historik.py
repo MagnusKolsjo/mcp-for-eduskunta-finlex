@@ -247,8 +247,13 @@ def synka_voteringsresultat(fran_sida: int = 1, max_sidor: int = 0) -> int:
 
         if not rader:
             if sida == fran_sida:
-                raise _kalla_fel(f"sida {sida} är tom")
-            log.info("Tom sida %d — synk klar", sida)
+                # En tom startsida är normal när en omstart pekar förbi sista
+                # sidan. Källan räknas som otillgänglig bara om även sida 1 är tom.
+                if sida == 1 or not hamta_sida("SaliDBAanestys", 1).get("rowData"):
+                    raise _kalla_fel("tabellen är tom")
+                log.info("Sida %d är tom: inget nytt efter föregående körning", sida)
+            else:
+                log.info("Tom sida %d — synk klar", sida)
             break
 
         for rad in rader:
@@ -289,7 +294,8 @@ def synka_voteringsresultat(fran_sida: int = 1, max_sidor: int = 0) -> int:
             detaljer={"senaste_sida": sida},
         )
 
-        if len(rader) < SIDSTORLEK or (max_sidor and sida - fran_sida + 1 >= max_sidor):
+        sista = len(rader) < SIDSTORLEK or svar.get("hasMore") is False
+        if sista or (max_sidor and sida - fran_sida + 1 >= max_sidor):
             log.info("Sista sidan för körningen nådd (sida %d, %d rader)", sida, len(rader))
             break
 
