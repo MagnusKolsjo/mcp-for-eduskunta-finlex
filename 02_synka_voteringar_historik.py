@@ -3,25 +3,33 @@
 # Copyright (C) 2026 Magnus Kolsjö
 
 """
-01_synka_voteringar_historik.py — Voteringshistorik 1996–2014 från avoindata.eduskunta.fi
+02_synka_voteringar_historik.py — Voteringshistorik 1996–2014 från avoindata.eduskunta.fi
 
-Det nya API:et (api.eduskunta.fi) täcker voteringar fr.o.m. ca 2015.
-Äldre voteringshistorik (1996–2014) hämtas från den sekundära källan
-avoindata.eduskunta.fi som exponerar tabelldata via GET /api/v1/tables/.
+Eduskuntas nya API (api.eduskunta.fi) har voteringar fr.o.m. plenum 94/2008
+(2008-10-17). Allt äldre, och därmed hela perioden 1996–2014 i ett svep,
+hämtas här ur Eduskuntas gamla öppna datatjänst avoindata.eduskunta.fi,
+som exponerar tabelldata via GET /api/v1/tables/.
+
+Den gamla tjänsten ska enligt Eduskunta ersättas av den nya "vid utgången
+av 2026". Inget datum för nedstängning är angivet. Redan synkade rader
+ligger kvar i den lokala databasen även om källan försvinner; synken kan
+däremot inte köras om. Ett nedstängt eller omgjort API ger ett tydligt fel
+och exitkod 1, aldrig en tyst körning med noll rader.
 
 Tabeller:
-  SaliDBAanestys        — voteringsresultat per omröstning (43 208 rader)
+  SaliDBAanestys        — voteringsresultat per omröstning, en rad per språk
   SaliDBAanestysEdustaja — enskild ledamots röst per votering (8,6M rader)
 
-OBS: Det historiska voteringsarkivet är stort. SaliDBAanestysEdustaja (enskilda röster)
-hoppas över i standardläge för att spara lagringsutrymme. Aktivera med --med-roster.
+OBS: SaliDBAanestysEdustaja (enskilda röster) synkas inte. Flaggan
+--med-roster finns kvar men skriver bara ut en varning.
 
 Kör:
-  python3 01_synka_voteringar_historik.py          # Bara voteringsresultat
-  python3 01_synka_voteringar_historik.py --med-roster  # Inkl. enskilda röster (3–5 GB)
+  python3 02_synka_voteringar_historik.py          # Bara voteringsresultat
+  python3 02_synka_voteringar_historik.py --fran-sida 120  # Återuppta
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -55,10 +63,29 @@ SIDSTORLEK     = 100
 # Hämtning från avoindata.eduskunta.fi
 # ---------------------------------------------------------------------------
 
+class KallanOtillganglig(RuntimeError):
+    """Den gamla datatjänsten svarar inte som väntat: nedstängd, flyttad eller omgjord."""
+
+
+def _kalla_fel(orsak: str) -> KallanOtillganglig:
+    return KallanOtillganglig(
+        f"avoindata.eduskunta.fi svarar inte som väntat ({orsak}). "
+        "Tjänsten ska enligt Eduskunta ersättas av api.eduskunta.fi vid "
+        "utgången av 2026 och kan ha stängts. Redan synkade voteringar ligger "
+        "kvar i databasen. Voteringar fr.o.m. 2008-10-17 finns i det nya API:t "
+        "och nås live via fi_hamta_aanestys; äldre saknas där."
+    )
+
+
 def hamta_sida(tabell: str, sida: int) -> dict:
     """
     Hämtar en sida från avoindata.eduskunta.fi.
     GET /api/v1/tables/{tabell}/rows?perPage=100&page={sida}
+
+    Tillfälliga fel (nätverk, 429, 5xx) prövas tre gånger. Ett svar som inte
+    har tabelltjänstens form — fel statuskod, HTML i stället för JSON eller
+    saknade kolumnnamn — betyder att tjänsten har ändrats eller stängts, och
+    ger KallanOtillganglig direkt.
     """
     url = f"{AVOINDATA_BASE}/{tabell}/rows"
     for forsok in range(3):
@@ -66,27 +93,34 @@ def hamta_sida(tabell: str, sida: int) -> dict:
             r = httpx.get(
                 url,
                 params={"perPage": SIDSTORLEK, "page": sida},
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
                 timeout=30,
             )
-            r.raise_for_status()
-            return r.json()
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             if forsok < 2:
-                log.warning("Fel vid hämtning sida %d (försök %d): %s", sida, forsok + 1, exc)
+                log.warning("Nätverksfel sida %d (försök %d): %s", sida, forsok + 1, exc)
                 time.sleep(5 * (forsok + 1))
-            else:
-                raise
+                continue
+            raise _kalla_fel(f"nätverksfel: {exc}") from exc
 
+        if r.status_code == 429 or r.status_code >= 500:
+            if forsok < 2:
+                log.warning("HTTP %d sida %d (försök %d)", r.status_code, sida, forsok + 1)
+                time.sleep(5 * (forsok + 1))
+                continue
+            raise _kalla_fel(f"HTTP {r.status_code}")
+        if r.status_code != 200:
+            raise _kalla_fel(f"HTTP {r.status_code} för {r.url}")
 
-def hamta_antal_rader(tabell: str) -> int:
-    """Hämtar totalt antal rader i en tabell."""
-    try:
-        svar = hamta_sida(tabell, 1)
-        return svar.get("rowData", {}).get("rowCount", 0) or svar.get("rowCount", 0) or 0
-    except Exception as exc:
-        log.error("Kunde inte hämta antal rader för %s: %s", tabell, exc)
-        return 0
+        try:
+            svar = r.json()
+        except ValueError as exc:
+            typ = r.headers.get("content-type", "okänd typ")
+            raise _kalla_fel(f"svaret är inte JSON ({typ})") from exc
+        if not isinstance(svar, dict) or "columnNames" not in svar or "rowData" not in svar:
+            raise _kalla_fel("svaret saknar columnNames/rowData")
+        return svar
+    raise _kalla_fel("inga fler försök")
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +210,13 @@ def parsad_aanestys(rad: dict) -> dict | None:
 # Synk av voteringsresultat
 # ---------------------------------------------------------------------------
 
-def synka_voteringsresultat(fran_sida: int = 1) -> int:
+def synka_voteringsresultat(fran_sida: int = 1, max_sidor: int = 0) -> int:
     """
     Synkar SaliDBAanestys (voteringsresultat) till lokal databas.
-    Returnerar antal synkade poster.
+
+    max_sidor > 0 begränsar körningen till så många sidor (för provkörning).
+    Returnerar antal synkade poster. Kastar KallanOtillganglig om källan
+    inte svarar som väntat.
     """
     log.info("Synkar voteringsresultat (SaliDBAanestys) fr.o.m. sida %d", fran_sida)
     totalt = 0
@@ -187,64 +224,62 @@ def synka_voteringsresultat(fran_sida: int = 1) -> int:
 
     while True:
         log.info("Hämtar sida %d (totalt: %d)", sida, totalt)
-        try:
-            svar     = hamta_sida("SaliDBAanestys", sida)
-            kolumner = svar.get("columnNames", [])
-            rader    = [dict(zip(kolumner, r)) for r in svar.get("rowData", [])]
+        # Fel från källan avbryter synken och propagerar till main(), så att
+        # körningen slutar med exitkod 1 i stället för att se lyckad ut.
+        svar     = hamta_sida("SaliDBAanestys", sida)
+        kolumner = svar.get("columnNames", [])
+        rader    = [dict(zip(kolumner, r)) for r in svar.get("rowData", [])]
 
-            if not rader:
-                log.info("Tom sida %d — synk klar", sida)
-                break
-
-            for rad in rader:
-                parsad = parsad_aanestys(rad)
-                if not parsad:
-                    continue
-
-                ar_rad = parsad["datum"][:4] if parsad["datum"] else None
-                ar_int = int(ar_rad) if ar_rad else None
-
-                # Hoppa över voteringar efter 2014 (täcks av det nya API:et)
-                if ar_int and ar_int > 2014:
-                    log.debug("Hoppar vp_ar=%s (täcks av ny API)", parsad.get("vp_ar"))
-                    continue
-
-                db.upsert_votering(
-                    aanestys_id  = parsad["aanestystunnus"],
-                    ar           = ar_int,
-                    vp_ar        = parsad["vp_ar"],
-                    istunto_nr   = parsad["istunto_nr"],
-                    datum        = parsad["datum"],
-                    otsikko_fi   = parsad["otsikko_fi"],
-                    otsikko_sv   = parsad["otsikko_sv"],
-                    ja_roster    = parsad["ja_roster"],
-                    nej_roster   = parsad["nej_roster"],
-                    tom_roster   = parsad["tom_roster"],
-                    franv_roster = parsad["franv_roster"],
-                    resultat     = parsad["resultat"],
-                    kalla        = "avoindata",
-                    raw_json     = parsad["raw"],
-                )
-                totalt += 1
-
-            # Spara checkpoint
-            db.set_sync_status(
-                kalla="voteringar_historik",
-                antal_poster=totalt,
-                detaljer={"senaste_sida": sida},
-            )
-
-            if len(rader) < SIDSTORLEK:
-                log.info("Sista sidan nådd (%d rader)", len(rader))
-                break
-
-            sida += 1
-            time.sleep(0.5)  # Vänta för att inte hammra API:et
-
-        except Exception as exc:
-            log.error("Fel på sida %d: %s", sida, exc)
-            log.info("Synk avbruten vid sida %d. Kör om med --fran-sida %d", sida, sida)
+        if not rader:
+            if sida == fran_sida:
+                raise _kalla_fel(f"sida {sida} är tom")
+            log.info("Tom sida %d — synk klar", sida)
             break
+
+        for rad in rader:
+            parsad = parsad_aanestys(rad)
+            if not parsad:
+                continue
+
+            ar_rad = parsad["datum"][:4] if parsad["datum"] else None
+            ar_int = int(ar_rad) if ar_rad else None
+
+            # Hoppa över voteringar efter 2014 (nås live via det nya API:et)
+            if ar_int and ar_int > 2014:
+                log.debug("Hoppar vp_ar=%s (täcks av ny API)", parsad.get("vp_ar"))
+                continue
+
+            db.upsert_votering(
+                aanestys_id  = parsad["aanestystunnus"],
+                ar           = ar_int,
+                vp_ar        = parsad["vp_ar"],
+                istunto_nr   = parsad["istunto_nr"],
+                datum        = parsad["datum"],
+                otsikko_fi   = parsad["otsikko_fi"],
+                otsikko_sv   = parsad["otsikko_sv"],
+                ja_roster    = parsad["ja_roster"],
+                nej_roster   = parsad["nej_roster"],
+                tom_roster   = parsad["tom_roster"],
+                franv_roster = parsad["franv_roster"],
+                resultat     = parsad["resultat"],
+                kalla        = "avoindata",
+                raw_json     = parsad["raw"],
+            )
+            totalt += 1
+
+        # Spara checkpoint
+        db.set_sync_status(
+            kalla="voteringar_historik",
+            antal_poster=totalt,
+            detaljer={"senaste_sida": sida},
+        )
+
+        if len(rader) < SIDSTORLEK or (max_sidor and sida - fran_sida + 1 >= max_sidor):
+            log.info("Sista sidan för körningen nådd (sida %d, %d rader)", sida, len(rader))
+            break
+
+        sida += 1
+        time.sleep(0.5)  # Vänta för att inte hammra API:et
 
     return totalt
 
@@ -259,6 +294,10 @@ def main():
     )
     parser.add_argument("--fran-sida",  type=int, default=1,
                         help="Startsida (för att återuppta avbruten synk)")
+    parser.add_argument("--max-sidor", type=int, default=0,
+                        help="Hämta högst så många sidor (0 = alla); för provkörning")
+    parser.add_argument("--ja", action="store_true",
+                        help="Kör om utan att fråga, även om synken redan körts")
     parser.add_argument("--med-roster", action="store_true",
                         help="Synka även enskilda ledamotsröster (SaliDBAanestysEdustaja, ~8,6M rader)")
     args = parser.parse_args()
@@ -267,7 +306,7 @@ def main():
 
     # Kontrollera om synken redan körts
     status = db.hamta_sync_status("voteringar_historik")
-    if status and status.get("antal_poster", 0) > 0 and args.fran_sida == 1:
+    if status and status.get("antal_poster", 0) > 0 and args.fran_sida == 1 and not args.ja:
         log.info(
             "Voteringshistorik redan synkad (%d poster, senast: %s). "
             "Kör med --fran-sida för att fortsätta eller tvinga om.",
@@ -278,7 +317,17 @@ def main():
             sys.exit(0)
 
     start  = time.time()
-    antal  = synka_voteringsresultat(fran_sida=args.fran_sida)
+    try:
+        antal = synka_voteringsresultat(fran_sida=args.fran_sida, max_sidor=args.max_sidor)
+    except KallanOtillganglig as exc:
+        log.error("%s", exc)
+        detaljer = (db.hamta_sync_status("voteringar_historik") or {}).get("detaljer") or {}
+        if isinstance(detaljer, str):  # SQLite lagrar JSON som text
+            detaljer = json.loads(detaljer)
+        sida = detaljer.get("senaste_sida")
+        if sida:
+            log.error("Senast sparade sida: %s. Återuppta med --fran-sida %s.", sida, sida + 1)
+        sys.exit(1)
     elapsed = time.time() - start
 
     log.info(

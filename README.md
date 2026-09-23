@@ -8,7 +8,7 @@ MCP-server (Model Context Protocol) som ger AI-verktyg tillgång till finska rik
 |---|---|---|
 | [Eduskunta Public API](https://api.eduskunta.fi) | Riksdagsdokument (`asiakirja`), ärenden (`valtiopäiväasia`), voteringar, ledamöter | Dokument och ärenden fr.o.m. valperiod 2015; sök och metadata i realtid via live API |
 | [Finlex öppna data](https://opendata.finlex.fi) | Originallagar (`statute`), konsoliderad lagtext (`statute-consolidated`), propositioner (`government-proposal`), fördrag (`treaty`) i AKN XML | Originallagar fr.o.m. 1929, konsoliderad lagtext fr.o.m. ca 2000, propositioner fr.o.m. 1992, fördrag fr.o.m. 1950; synkad lokalt med fulltext |
-| [Eduskunta Avoin Data](https://avoindata.eduskunta.fi) | Voteringshistorik (historisk bulk, sekundär källa) | 1996–2014; voteringar fr.o.m. 2015 hämtas via Eduskunta Public API |
+| [Eduskunta Avoin Data](https://avoindata.eduskunta.fi) | Voteringshistorik (historisk bulk, sekundär källa, avvecklas) | 1996–2014, synkad lokalt; se [Voteringshistorik 1996–2014](#voteringshistorik-19962014) |
 
 Finlands tvåspråkiga lagstiftning finns på finska (`fin@`) och svenska (`swe@`) i Akoma Ntoso-format.
 
@@ -62,10 +62,10 @@ python3 03_chunka_och_embedda.py --sprak bada --tvinga
 python3 03_chunka_och_embedda.py --bygg-index
 ```
 
-Voteringshistorik 1996–2014:
+Voteringshistorik 1996–2014 (valfritt, se nedan):
 
 ```
-python3 01_synka_voteringar_historik.py
+python3 02_synka_voteringar_historik.py
 ```
 
 **4. Konfigurera MCP-klienten**
@@ -79,6 +79,29 @@ Lägg till i klientens konfiguration:
   "cwd": "/sökväg/till/finland-mappen"
 }
 ```
+
+## Voteringshistorik 1996–2014
+
+`fi_hamta_aanestys` hämtar voteringar live ur Eduskunta Public API. Där finns
+voteringar fr.o.m. plenum 94/2008 (2008-10-17); äldre voteringar saknas i det
+nya API:t.
+
+`02_synka_voteringar_historik.py` hämtar i stället hela perioden 1996–2014 ur
+Eduskuntas gamla datatjänst `avoindata.eduskunta.fi` (tabellen `SaliDBAanestys`)
+till tabellen `voteringar` i den lokala databasen. Inget MCP-verktyg läser
+tabellen; den är ett lokalt arkiv för egna frågor mot databasen.
+
+- Eduskunta anger att materialet i den gamla tjänsten flyttas till den nya
+  vid utgången av 2026. Något datum för nedstängning är inte angivet, och
+  voteringarna före oktober 2008 finns ännu inte i det nya API:t.
+- Redan synkade voteringar ligger kvar lokalt även om den gamla tjänsten
+  stängs. Synken går däremot inte att köra om efter det. Den som vill ha
+  materialet bör alltså köra synken medan tjänsten finns kvar.
+- Svarar tjänsten inte längre som väntat (fel statuskod, HTML i stället för
+  JSON, tom första sida) avbryts synken med ett felmeddelande och exitkod 1.
+  Den rapporterar aldrig en lyckad körning med noll rader.
+- `--max-sidor N` begränsar en provkörning; `--fran-sida N` återupptar en
+  avbruten synk.
 
 ## Tvåspråkig sökning
 
