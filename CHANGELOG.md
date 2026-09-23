@@ -51,8 +51,9 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   nedstängd. En tom startsida tolkas nu som "inget nytt" så länge sida 1 har rader.
 - Trådsäkerhet: lås kring lat inläsning av de två embeddingmodellerna, kring
   tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
-  anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att
-  samtidiga protokollsvar inte hamnar i loggfilen.
+  anslutning per tråd. Omdirigeringen av fd 1/2, som samlar modellbibliotekens
+  utskrifter i loggfilen, görs bara under modellinläsningen och under låset, så att två
+  trådar inte kan återställa fildeskriptorerna i fel ordning.
 - En cacheskrivning eller cacheläsning som misslyckas fäller inte längre
   `fi_hamta_dokument` och `fi_hamta_lag`; de hämtar då live från källan.
 - Databasfel i `fi_sok`, `fi_sok_finlex` och `fi_sok_i_dokument` ger ett felmeddelande

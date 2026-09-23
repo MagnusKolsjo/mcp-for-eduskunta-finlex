@@ -346,8 +346,13 @@ def _skar_ut(text, max_tecken: int, fran_tecken: int = 0) -> dict:
 @_contextlib.contextmanager
 def _tysta_stdout():
     """
-    OS-nivå FD-omdirigering skyddar MCP stdio-protokollet från oavsiktliga
-    utskrifter under sentence-transformers-modell-laddning.
+    Leder fd 1 och 2 till logs/subprocess.log medan en modell laddas.
+
+    sentence-transformers och dess beroenden skriver förlopp och varningar
+    direkt till fd 1/2; omdirigeringen samlar dem i loggfilen. Den ändrar
+    processglobala fildeskriptorer, så den körs bara under _modell_lock:
+    två trådar som omdirigerar samtidigt kan annars återställa i fel ordning
+    och lämna stdout pekande på loggfilen.
     """
     import os as _os2
     logs_mapp = _SCRIPT_DIR / "logs"
@@ -370,7 +375,7 @@ def _tysta_stdout():
 
 
 def _hamta_modell_fi():
-    """Laddar TurkuNLP-modellen lazily (skyddad mot FD 1-läckage)."""
+    """Laddar TurkuNLP-modellen lat; utskrifter under inläsningen hamnar i loggfilen."""
     global _modell_fi
     if _modell_fi is None:
         with _modell_lock:
@@ -383,7 +388,7 @@ def _hamta_modell_fi():
 
 
 def _hamta_modell_sv():
-    """Laddar KBLab-modellen lazily (skyddad mot FD 1-läckage)."""
+    """Laddar KBLab-modellen lat; utskrifter under inläsningen hamnar i loggfilen."""
     global _modell_sv
     if _modell_sv is None:
         with _modell_lock:
@@ -398,10 +403,8 @@ def _hamta_modell_sv():
 def _embedda(text: str, sprak: str = "fi") -> list[float]:
     """Skapar en embedding för texten med rätt modell.
 
-    Bara modellinläsningen omdirigerar fd 1. Omdirigeringen gäller hela
-    processen, och verktygen körs på arbetstrådar: under tiden den är aktiv
-    skulle protokollsvar från andra anrop hamna i loggfilen. encode() skriver
-    inget till stdout när förloppsindikatorn är avstängd.
+    Bara modellinläsningen omdirigeras (se _tysta_stdout); encode() körs
+    utan förloppsindikator och skriver då inget till fd 1/2.
     """
     modell = _hamta_modell_sv() if sprak == "sv" else _hamta_modell_fi()
     vec = modell.encode(text, normalize_embeddings=True, show_progress_bar=False)
