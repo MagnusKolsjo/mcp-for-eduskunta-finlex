@@ -612,7 +612,10 @@ def fi_hamta_dokument(
                  if (r.get("asiakirja") or r).get("kielikoodi") == "fi"),
                 treffar[0].get("asiakirja") or treffar[0],
             )
-            meta = fi_treff
+            # Söksvaret bär hela fulltexten i fullText; den hämtas separat nedan
+            # och ska inte följa med i metadata (ett par hundra tusen tecken).
+            meta = {k: v for k, v in fi_treff.items()
+                    if k not in ("snippet", "fullText", "fullTextSnippet")}
             edk_id = meta.get("edktunnus")
     except Exception as exc:
         return {"fel": f"Kunde inte hämta metadata: {exc}"}
