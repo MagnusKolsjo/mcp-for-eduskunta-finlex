@@ -15,7 +15,8 @@ Akoma Ntoso XML returneras. Rotelementet skiljer sig:
 
 Viktigt:
   - User-Agent-header är OBLIGATORISK — servern returnerar 403 utan den.
-  - publishedSince på /list returnerar 400 — använd startYear/endYear istället.
+  - publishedSince på /list kräver tidszon (2026-09-15T00:00:00Z); utan tidszon
+    svarar servern 400. Den ger dokument som publicerats eller ändrats sedan dess.
   - /list returnerar JSON (inte XML), max 10 poster per sida.
   - Rate-limiting: vänta vid 429.
 
@@ -180,6 +181,7 @@ def hamta_lista(
     slut_ar: Optional[int] = None,
     sprak_version: Optional[str] = None,
     titel_innehaller: Optional[str] = None,
+    publicerad_sedan: Optional[str] = None,
 ) -> list[dict]:
     """
     Hämtar en sida från /list-endpointen för en dokumenttyp.
@@ -195,6 +197,8 @@ def hamta_lista(
       slut_ar         — årsfilter till
       sprak_version   — "fin@" eller "swe@"
       titel_innehaller — titelfilter
+      publicerad_sedan — ISO 8601-tidpunkt med tidszon; bara poster som
+                         publicerats eller ändrats sedan dess
     """
     url = f"{API_BASE}/akn/fi/{hierarki}/{typ}/list"
     params: dict = {"page": sida, "limit": min(limit, 10)}
@@ -206,6 +210,8 @@ def hamta_lista(
         params["langAndVersion"] = sprak_version
     if titel_innehaller:
         params["titleContains"] = titel_innehaller
+    if publicerad_sedan:
+        params["publishedSince"] = publicerad_sedan
 
     svar = _get_json(url, params)
     if isinstance(svar, list):
@@ -222,6 +228,7 @@ def hamta_alla_i_lista(
     start_ar: Optional[int] = None,
     slut_ar: Optional[int] = None,
     sprak_version: Optional[str] = None,
+    publicerad_sedan: Optional[str] = None,
 ) -> list[dict]:
     """
     Paginerar igenom hela /list-endpointen och returnerar alla poster.
@@ -240,6 +247,7 @@ def hamta_alla_i_lista(
             start_ar=start_ar,
             slut_ar=slut_ar,
             sprak_version=sprak_version,
+            publicerad_sedan=publicerad_sedan,
         )
         if not poster:
             break

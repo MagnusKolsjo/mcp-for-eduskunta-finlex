@@ -8,6 +8,12 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- **Finlex-synken är inkrementell via `publishedSince`.** `01_synka_finlex.py` hämtar
+  utan flaggor alla dokument som publicerats eller ändrats sedan senaste lyckade
+  körning (med en dags marginal), oavsett dokumentets år. Tidigare synkades bara de två
+  senaste åren, så nya konsoliderade lydelser av äldre lagar kom aldrig med. Tidpunkten
+  sparas per dokumenttyp i `sync_status`; `--sedan` anger den uttryckligen. `--alla` och
+  `--ar` synkar årsvis som förut.
 - **Brytande: kräver `mcp>=2.0,<3`.** Servern bygger på `MCPServer`; `mcp.server.fastmcp`
   finns inte i mcp 2.x.
 - **Brytande: http-läget kräver `MCP_API_KEY`.** Utan nyckel avbryts uppstarten med

@@ -14,10 +14,12 @@ Täcker:
   doc/government-proposal  — propositioner (HE/RP) fr.o.m. 1992
   doc/treaty               — fördragssamlingen
 
-Inkrementell synk: scriptet läser senaste synkade år från sync_status-tabellen
-och hämtar bara nya/ändrade dokument (startYear = senaste_ar, endYear = innevarande år).
-/list-endpointens status-fält (NEW/MODIFIED) används för prioritering men alla
-poster processas.
+Inkrementell synk: /list med publishedSince ger alla dokument som publicerats
+eller ändrats sedan senaste lyckade körning, oavsett dokumentets år. Det fångar
+också nya konsoliderade lydelser av gamla lagar. Starttidpunkten för varje
+lyckad körning sparas per dokumenttyp i sync_status (detaljer.publicerad_sedan)
+och nästa körning börjar en dag före den, som marginal mot klockskillnader.
+Saknas tidpunkten används sist_synkad; saknas även den görs en årsvis synk.
 
 Kör scriptet manuellt för initial bulk-synk (kan ta timmar):
   python3 01_synka_finlex.py --alla
@@ -29,17 +31,19 @@ Flaggor:
   --alla       Synka fr.o.m. äldsta kända år (1929 för statute, 1992 för proposal)
   --typ TYP    Synka bara en specifik typ (t.ex. --typ statute)
   --ar AR      Synka ett specifikt år
+  --sedan TID  Inkrementell synk från en given tidpunkt (ISO 8601, t.ex. 2026-05-01)
   --trad N     Antal parallella trådar (default 2 — respektera rate limit)
   --torr       Torrkörning: hämta /list men ladda inte ned XML
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
@@ -221,7 +225,90 @@ def _typ_av_uri(uri: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Inkrementell vs. full synk
+# Inkrementell synk via publishedSince
+# ---------------------------------------------------------------------------
+
+MARGINAL = timedelta(days=1)
+
+
+def _iso_utc(t: datetime) -> str:
+    """Tidpunkt i det format Finlex kräver: UTC med Z-suffix."""
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tolka_tid(varde) -> datetime | None:
+    """Tolkar en sparad eller angiven tidpunkt; datum utan tid och tid utan zon blir UTC."""
+    if varde is None:
+        return None
+    if isinstance(varde, datetime):
+        t = varde
+    else:
+        text = str(varde).strip().replace("Z", "+00:00")
+        try:
+            t = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def bestam_publicerad_sedan(typ: str) -> datetime | None:
+    """Tidpunkt att synka från: senaste lyckade körning, annars sist_synkad."""
+    status = db.hamta_sync_status(f"finlex_{typ.replace('-', '_')}") or {}
+    detaljer = status.get("detaljer") or {}
+    if isinstance(detaljer, str):  # SQLite lagrar JSON som text
+        detaljer = json.loads(detaljer)
+    t = _tolka_tid(detaljer.get("publicerad_sedan")) or _tolka_tid(status.get("sist_synkad"))
+    return t - MARGINAL if t else None
+
+
+def synka_sedan(
+    hierarki: str,
+    typ: str,
+    sedan: datetime,
+    torrkoring: bool = False,
+    max_trad: int = 2,
+) -> int:
+    """
+    Synkar alla dokument av en typ som publicerats eller ändrats sedan `sedan`.
+
+    Körningens starttid sparas först när alla poster är behandlade, så att en
+    avbruten körning upprepas från samma tidpunkt nästa gång.
+    """
+    kalla_nyckel = f"finlex_{typ.replace('-', '_')}"
+    korningens_start = datetime.now(timezone.utc)
+    poster = fx.hamta_alla_i_lista(
+        hierarki=hierarki, typ=typ, publicerad_sedan=_iso_utc(sedan),
+    )
+    log.info("%s/%s: %d poster publicerade eller ändrade sedan %s",
+             hierarki, typ, len(poster), _iso_utc(sedan))
+    if torrkoring or not poster:
+        if not torrkoring:
+            db.set_sync_status(kalla=kalla_nyckel,
+                               detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
+        return len(poster)
+
+    totalt = 0
+    misslyckade = 0
+    with ThreadPoolExecutor(max_workers=max_trad) as pool:
+        fragor = [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
+        for framtid in as_completed(fragor):
+            try:
+                totalt += framtid.result()
+            except Exception as exc:
+                misslyckade += 1
+                log.error("Batch misslyckades: %s", exc)
+
+    if misslyckade:
+        log.warning("%s/%s: %d batcher misslyckades; tidpunkten flyttas inte fram",
+                    hierarki, typ, misslyckade)
+    else:
+        db.set_sync_status(kalla=kalla_nyckel, antal_poster=totalt,
+                           detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
+    return totalt
+
+
+# ---------------------------------------------------------------------------
+# Årsvis synk (full synk och första körning)
 # ---------------------------------------------------------------------------
 
 def bestam_startaar(hierarki: str, typ: str, tvinga_alla: bool) -> int:
@@ -327,6 +414,7 @@ def main():
     parser.add_argument("--alla",             action="store_true", help="Synka fr.o.m. äldsta år (full synk)")
     parser.add_argument("--typ",              type=str,            help="Synka bara en specifik typ (t.ex. statute)")
     parser.add_argument("--ar",               type=int,            help="Synka ett specifikt år")
+    parser.add_argument("--sedan",            type=str,            help="Inkrementell synk från tidpunkt (ISO 8601)")
     parser.add_argument("--trad",             type=int, default=2, help="Antal parallella trådar (default 2)")
     parser.add_argument("--torr",             action="store_true", help="Torrkörning (hämtar /list men ingen XML)")
     parser.add_argument("--installera-schema", action="store_true", help="Installera schemalagt jobb via cron eller launchd (se .env)")
@@ -349,6 +437,19 @@ def main():
             sys.exit(1)
 
     for hierarki, typ in kallor:
+        if not args.alla and not args.ar:
+            sedan = _tolka_tid(args.sedan) if args.sedan else bestam_publicerad_sedan(typ)
+            if args.sedan and sedan is None:
+                log.error("Ogiltig tidpunkt för --sedan: %s", args.sedan)
+                sys.exit(1)
+            if sedan is not None:
+                log.info("=== Synkar %s/%s, ändrat sedan %s ===", hierarki, typ, _iso_utc(sedan))
+                start = time.time()
+                antal = synka_sedan(hierarki, typ, sedan, args.torr, args.trad)
+                log.info("=== %s/%s klar: %d dokument på %.0f s ===",
+                         hierarki, typ, antal, time.time() - start)
+                continue
+
         if args.ar:
             fran_ar = args.ar
             till_ar = args.ar
