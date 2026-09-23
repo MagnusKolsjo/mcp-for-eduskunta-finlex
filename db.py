@@ -791,7 +791,18 @@ def upsert_votering(
             nej_roster   = COALESCE(EXCLUDED.nej_roster,   voteringar.nej_roster),
             tom_roster   = COALESCE(EXCLUDED.tom_roster,   voteringar.tom_roster),
             franv_roster = COALESCE(EXCLUDED.franv_roster, voteringar.franv_roster),
-            resultat     = COALESCE(EXCLUDED.resultat,     voteringar.resultat)
+            -- Resultatet räknas om ur de sammanslagna talen, så att det
+            -- aldrig kan motsäga ja_roster/nej_roster.
+            resultat = CASE
+                WHEN COALESCE(EXCLUDED.ja_roster, voteringar.ja_roster) IS NULL
+                  OR COALESCE(EXCLUDED.nej_roster, voteringar.nej_roster) IS NULL
+                THEN NULL
+                WHEN COALESCE(EXCLUDED.ja_roster, voteringar.ja_roster)
+                   > COALESCE(EXCLUDED.nej_roster, voteringar.nej_roster) THEN 'JA'
+                WHEN COALESCE(EXCLUDED.ja_roster, voteringar.ja_roster)
+                   < COALESCE(EXCLUDED.nej_roster, voteringar.nej_roster) THEN 'NEJ'
+                ELSE NULL
+            END
     """
 
     with _cursor() as cur:

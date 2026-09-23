@@ -127,6 +127,13 @@ def hamta_sida(tabell: str, sida: int) -> dict:
 # Parsning av SaliDBAanestys
 # ---------------------------------------------------------------------------
 
+def _resultat(ja: int | None, nej: int | None) -> str | None:
+    """JA eller NEJ ur rösttalen; None vid lika eller när något tal saknas."""
+    if ja is None or nej is None or ja == nej:
+        return None
+    return "JA" if ja > nej else "NEJ"
+
+
 def parsad_aanestys(rad: dict) -> dict | None:
     """
     Konverterar en rad från SaliDBAanestys till voteringsfält.
@@ -187,15 +194,12 @@ def parsad_aanestys(rad: dict) -> dict | None:
         # Datum från tidsstämpel
         datum = aika[:10] if aika and len(aika) >= 10 else None
 
-        # Resultat beräknas från röstantal (inget Tulos-fält i denna tabell)
-        ja_int  = int(ja)  if ja  is not None else 0
-        nej_int = int(nej) if nej is not None else 0
-        if ja_int > nej_int:
-            resultat = "JA"
-        elif nej_int > ja_int:
-            resultat = "NEJ"
-        else:
-            resultat = None
+        # Resultat beräknas från röstantal (inget Tulos-fält i denna tabell).
+        # Saknas något av talen lämnas resultatet tomt i stället för att
+        # gissas; upserten räknar om det ur de sammanslagna talen.
+        ja_int  = int(ja)  if ja  is not None else None
+        nej_int = int(nej) if nej is not None else None
+        resultat = _resultat(ja_int, nej_int)
 
         return {
             "aanestystunnus": aanestystunnus,
@@ -205,8 +209,8 @@ def parsad_aanestys(rad: dict) -> dict | None:
             "otsikko_fi":     " – ".join(x for x in (kohta_otsikko, aanestys_otsikko) if x) or None
                               if kieli == "fi" else None,
             "otsikko_sv":     (kohta_otsikko or None) if kieli == "sv" else None,
-            "ja_roster":      ja_int  if ja  is not None else None,
-            "nej_roster":     nej_int if nej is not None else None,
+            "ja_roster":      ja_int,
+            "nej_roster":     nej_int,
             "tom_roster":     int(tom)   if tom   is not None else None,
             "franv_roster":   int(franv) if franv is not None else None,
             "resultat":       resultat,

@@ -41,6 +41,9 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   voteringsrubriken ur den finska raden (`KohtaOtsikko – AanestysOtsikko`) och
   `otsikko_sv` ärendets rubrik ur den svenska raden. `upsert_votering` slår ihop raderna
   utan att nolla fält som den andra raden fyllt i. Redan synkade rader rättas vid omsynk.
+- Historiksynkens `resultat` kunde motsäga rösttalen: saknade tal räknades som 0 och
+  sammanslagningen behöll resultatet från den ena raden. Resultatet räknas nu om ur de
+  sammanslagna `ja_roster`/`nej_roster` och lämnas tomt när något tal saknas.
 - Trådsäkerhet: lås kring lat inläsning av de två embeddingmodellerna, kring
   tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
   anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att
