@@ -142,7 +142,16 @@ def parsad_aanestys(rad: dict) -> dict | None:
       Url, AanestysPoytakirja, AanestysPoytakirjaUrl, AanestysValtiopaivaasia,
       AanestysValtiopaivaasiaUrl, AliKohtaTunniste, Imported
 
-    KieliId: 1 = fi, 2 = sv (kontrollerat mot titlar i svaren)
+    KieliId: 1 = fi, 2 = sv. Varje votering finns som två rader, en per språk,
+    med samma aanestystunnus men olika AanestysId.
+
+    Rubriker: AanestysOtsikko (voteringens egen rubrik, t.ex. "Pöydällepano,
+    Pulliainen/Rosendahl") finns bara på finska och är identisk i båda
+    raderna. Det språkberoende fältet är KohtaOtsikko (ärendets rubrik).
+    Därför blir otsikko_fi "KohtaOtsikko – AanestysOtsikko" ur den finska
+    raden och otsikko_sv KohtaOtsikko ur den svenska raden. Varje rad fyller
+    bara sitt eget språkfält; upserten slår ihop dem.
+
     Inget Tulos-fält — resultat beräknas från Jaa vs Ei.
     """
     if not rad:
@@ -154,7 +163,8 @@ def parsad_aanestys(rad: dict) -> dict | None:
         istunto_nr      = rad.get("IstuntoNumero")
         vp_ar_raw       = rad.get("IstuntoVPVuosi")
         aika            = rad.get("AanestysAlkuaika") or rad.get("IstuntoPvm", "")
-        otsikko         = rad.get("AanestysOtsikko") or rad.get("PaaKohtaOtsikko", "")
+        aanestys_otsikko = (rad.get("AanestysOtsikko") or "").strip()
+        kohta_otsikko    = (rad.get("KohtaOtsikko") or rad.get("PaaKohtaOtsikko") or "").strip()
         ja              = rad.get("AanestysTulosJaa")
         nej             = rad.get("AanestysTulosEi")
         tom             = rad.get("AanestysTulosTyhjia")
@@ -192,8 +202,9 @@ def parsad_aanestys(rad: dict) -> dict | None:
             "vp_ar":          vp_ar,
             "istunto_nr":     istunto,
             "datum":          datum,
-            "otsikko_fi":     otsikko if kieli == "fi" else None,
-            "otsikko_sv":     otsikko if kieli == "sv" else None,
+            "otsikko_fi":     " – ".join(x for x in (kohta_otsikko, aanestys_otsikko) if x) or None
+                              if kieli == "fi" else None,
+            "otsikko_sv":     (kohta_otsikko or None) if kieli == "sv" else None,
             "ja_roster":      ja_int  if ja  is not None else None,
             "nej_roster":     nej_int if nej is not None else None,
             "tom_roster":     int(tom)   if tom   is not None else None,

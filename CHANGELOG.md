@@ -35,6 +35,12 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 - `fi_hamta_dokument` via `eduskuntatunnus` tog med söksvarets fulltext i `metadata`;
   ett svar med `max_tecken=1500` blev drygt 326 000 tecken.
 - Historiksynken avbröt tidigare tyst vid fel och rapporterade körningen som lyckad.
+- **Historiksynken tappade de finska rubrikerna.** Källan har en rad per språk och
+  votering; den svenska raden skrev över `otsikko_fi` med NULL, och båda språkfälten fick
+  den enbart finska `AanestysOtsikko`. Nu blir `otsikko_fi` ärendets rubrik plus
+  voteringsrubriken ur den finska raden (`KohtaOtsikko – AanestysOtsikko`) och
+  `otsikko_sv` ärendets rubrik ur den svenska raden. `upsert_votering` slår ihop raderna
+  utan att nolla fält som den andra raden fyllt i. Redan synkade rader rättas vid omsynk.
 - Trådsäkerhet: lås kring lat inläsning av de två embeddingmodellerna, kring
   tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
   anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att

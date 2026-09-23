@@ -775,6 +775,9 @@ def upsert_votering(
     t = _prefix()
     raw = json.dumps(raw_json) if raw_json else None
 
+    # Källan levererar en rad per språk för samma votering. Upserten slår
+    # ihop dem: ett NULL-fält i den ena raden får aldrig nolla det den andra
+    # raden redan fyllt i. raw_json behåller den först inlästa raden.
     sql = f"""
         INSERT INTO {t}voteringar
             (aanestys_id, ar, vp_ar, istunto_nr, datum,
@@ -782,23 +785,13 @@ def upsert_votering(
              tom_roster, franv_roster, resultat, kalla, raw_json)
         VALUES ({', '.join([p]*14)})
         ON CONFLICT (aanestys_id) DO UPDATE SET
-            otsikko_fi  = EXCLUDED.otsikko_fi,
-            otsikko_sv  = EXCLUDED.otsikko_sv,
-            ja_roster   = EXCLUDED.ja_roster,
-            nej_roster  = EXCLUDED.nej_roster,
-            resultat    = EXCLUDED.resultat
-    """ if _ar_postgres() else f"""
-        INSERT INTO {t}voteringar
-            (aanestys_id, ar, vp_ar, istunto_nr, datum,
-             otsikko_fi, otsikko_sv, ja_roster, nej_roster,
-             tom_roster, franv_roster, resultat, kalla, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (aanestys_id) DO UPDATE SET
-            otsikko_fi = excluded.otsikko_fi,
-            otsikko_sv = excluded.otsikko_sv,
-            ja_roster  = excluded.ja_roster,
-            nej_roster = excluded.nej_roster,
-            resultat   = excluded.resultat
+            otsikko_fi   = COALESCE(EXCLUDED.otsikko_fi,   voteringar.otsikko_fi),
+            otsikko_sv   = COALESCE(EXCLUDED.otsikko_sv,   voteringar.otsikko_sv),
+            ja_roster    = COALESCE(EXCLUDED.ja_roster,    voteringar.ja_roster),
+            nej_roster   = COALESCE(EXCLUDED.nej_roster,   voteringar.nej_roster),
+            tom_roster   = COALESCE(EXCLUDED.tom_roster,   voteringar.tom_roster),
+            franv_roster = COALESCE(EXCLUDED.franv_roster, voteringar.franv_roster),
+            resultat     = COALESCE(EXCLUDED.resultat,     voteringar.resultat)
     """
 
     with _cursor() as cur:
