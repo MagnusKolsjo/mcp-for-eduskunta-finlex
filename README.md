@@ -1,6 +1,6 @@
 # MCP-server för finsk riksdags- och rättsdata
 
-MCP-server (Model Context Protocol) som ger AI-verktyg tillgång till finska riksdags- och rättsdata via sju verktyg med prefixet `fi_`.
+MCP-server (Model Context Protocol) som ger AI-verktyg tillgång till finska riksdags- och rättsdata via nio verktyg med prefixet `fi_`.
 
 ## Datakällor
 
@@ -19,15 +19,17 @@ Finlands tvåspråkiga lagstiftning finns på finska (`fin@`) och svenska (`swe@
 | `fi_sok` | Aggregerad sökning över Eduskunta och Finlex |
 | `fi_sok_eduskunta` | Strukturerad sökning i riksdagsdokument |
 | `fi_sok_finlex` | FTS och semantisk sökning i lokal Finlex-databas |
+| `fi_sok_i_dokument` | Semantisk sökning i ett enskilt chunkat och embeddat dokument |
 | `fi_hamta_dokument` | Hämtar fulltext för ett riksdagsdokument via edktunnus eller riksdagsbeteckning (`max_tecken`, `fran_tecken`) |
 | `fi_hamta_arende` | Hämtar ett riksdagsärende (valtiopäiväasia) med tillhörande dokument via ärendenummer |
-| `fi_hamta_lag` | Hämtar specifik lag eller proposition från Finlex via AKN URI, år+nummer eller ELI (`max_tecken`, `fran_tecken`) |
-| `fi_hamta_aanestys` | Voteringsresultat för en specifik votering |
+| `fi_hamta_lag` | Hämtar specifik lag eller proposition från Finlex via AKN URI eller år+nummer; `typ="statute-consolidated"` ger senaste konsoliderade lydelsen (`max_tecken`, `fran_tecken`) |
+| `fi_hamta_aanestys` | Voteringsresultat live ur Eduskunta Public API (fr.o.m. 2008-10-17) |
 | `fi_lista_vaalikaudet` | Valperioder och riksmöten (fr.o.m. 1907) |
 
 ## Krav
 
 - Python 3.11+
+- `mcp` 2.x (`mcp>=2.0,<3`)
 - PostgreSQL med pgvector-tillägg eller SQLite (välj via `DATABASE_URL` — PostgreSQL krävs för semantisk sökning)
 - Paket: se listan nedan
 
@@ -36,7 +38,7 @@ Finlands tvåspråkiga lagstiftning finns på finska (`fin@`) och svenska (`swe@
 **1. Installera beroenden**
 
 ```
-pip install mcp psycopg2-binary python-dotenv requests httpx lxml sentence-transformers pgvector langdetect
+pip install -r requirements.txt
 ```
 
 **2. Konfigurera**
@@ -79,6 +81,14 @@ Lägg till i klientens konfiguration:
   "cwd": "/sökväg/till/finland-mappen"
 }
 ```
+
+**5. http-läge (valfritt)**
+
+Med `MCP_TRANSPORT=http` startar servern Streamable HTTP på
+`MCP_HOST:MCP_PORT` (standard `127.0.0.1:8005`), med endpointen `/mcp`.
+Varje anrop kräver `Authorization: Bearer <MCP_API_KEY>`: saknad header ger
+401 och fel nyckel 403. Utan `MCP_API_KEY` startar servern inte i http-läge
+(exitkod 2). SSE stöds inte.
 
 ## Voteringshistorik 1996–2014
 

@@ -1,8 +1,8 @@
 # MCP-server för finsk riksdags- och rättsdata (Eduskunta, Finlex)
 # Installera: pip install -r requirements.txt
 
-# MCP-server
-mcp>=1.0.0
+# MCP-server (MCPServer finns från mcp 2.0)
+mcp>=2.0,<3
 
 # HTTP-anrop mot api.eduskunta.fi och opendata.finlex.fi
 httpx>=0.27.0
@@ -22,7 +22,7 @@ psycopg2-binary>=2.9.0
 # Alternativ B: SQLite (ingen serverinstallation)
 # sqlite-vec installeras separat: pip install sqlite-vec
 
-# HTTP-transport (krävs för MCP_TRANSPORT=http)
+# HTTP-transport (MCP_TRANSPORT=http); installeras även som beroenden till mcp
 starlette>=0.40.0
 uvicorn>=0.30.0
 

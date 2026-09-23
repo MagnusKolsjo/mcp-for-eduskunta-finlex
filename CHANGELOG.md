@@ -4,6 +4,54 @@ Alla väsentliga ändringar dokumenteras här.
 Formatet följer [Keep a Changelog](https://keepachangelog.com/sv/1.0.0/)
 och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Ändrat
+
+- **Brytande: kräver `mcp>=2.0,<3`.** Servern bygger på `MCPServer`; `mcp.server.fastmcp`
+  finns inte i mcp 2.x.
+- **Brytande: http-läget kräver `MCP_API_KEY`.** Utan nyckel avbryts uppstarten med
+  exitkod 2, i stället för att servern startar oautentiserad med en varning. Fel nyckel
+  ger nu 403 (saknad header 401). Transporten sköts av `mcp_transport.py`.
+- **Brytande: förväntade fel returneras som MCP-fel (`isError`)** i stället för svar med
+  en `fel`-nyckel: okänd beteckning eller okänt ärende, okänd votering, dokument som
+  saknas i cachen eller saknar embeddings, saknade argument och HTTP-fel från Eduskunta.
+- Alla verktyg har titel och annotationer (läsning mot källa eller mot lokal databas)
+  samt typade svar med `outputSchema`. Verktygsnamn och parametrar är oförändrade.
+- `02_synka_voteringar_historik.py` avbryts med felmeddelande och exitkod 1 när
+  `avoindata.eduskunta.fi` inte svarar som väntat (fel statuskod, icke-JSON, tom första
+  sida). Nya flaggor: `--max-sidor` för provkörning och `--ja` för omkörning utan fråga.
+- `fi_hamta_aanestys` och serverns instruktioner anger att Eduskunta Public API har
+  voteringar fr.o.m. 2008-10-17.
+
+### Fixat
+
+- **`fi_hamta_lag` med `ar`+`nummer` och `typ="statute-consolidated"` gav 404 för
+  ändrade lagar**, t.ex. grundlagen 731/1999. Konsoliderad lagtext finns i tidsversioner
+  (`fin@20180817`); den oversionerade adressen `fin@` finns bara för lagar som aldrig
+  ändrats. Adressen byggs nu med Finlex version `latest`, och svaret och cacheposten får
+  den version som levererades. Saknas konsoliderad lydelse föreslår felet `typ="statute"`.
+- `fi_hamta_lag` med en versionerad AKN-URI tolkade versionen som myndighetskod.
+- `fi_hamta_dokument` via `eduskuntatunnus` tog med söksvarets fulltext i `metadata`;
+  ett svar med `max_tecken=1500` blev drygt 326 000 tecken.
+- Historiksynken avbröt tidigare tyst vid fel och rapporterade körningen som lyckad.
+- Trådsäkerhet: lås kring lat inläsning av de två embeddingmodellerna, kring
+  tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
+  anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att
+  samtidiga protokollsvar inte hamnar i loggfilen.
+- En cacheskrivning som misslyckas fäller inte längre svaret från `fi_hamta_dokument`
+  och `fi_hamta_lag`.
+
+### Borttaget
+
+- SSE-transporten och den egna Starlette-/uvicorn-koden i `mcp_server.py`.
+
+### Kända begränsningar
+
+- Voteringar före 2008-10-17 finns inte i Eduskunta Public API. Historiksynken hämtar
+  1996–2014 ur `avoindata.eduskunta.fi`, som ska ersättas vid utgången av 2026. Redan
+  synkade rader ligger kvar lokalt; synken kan inte köras om när tjänsten har stängts.
+
 ## [1.2.0] — 2026-08-10
 
 ### Tillagt
