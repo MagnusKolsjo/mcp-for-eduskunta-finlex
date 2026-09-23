@@ -27,34 +27,36 @@ Tvåspråkighet:
   Frågespråket detekteras automatiskt. Citat hämtas alltid från swe@-AKN-URI,
   inte maskinöversätts.
 
-Transport-lägen (styrs via MCP_TRANSPORT i .env):
-  stdio (standard): MCP-klienten startar processen direkt.
-  http: Servern lyssnar på MCP_HOST:MCP_PORT med Bearer-token-autentisering.
+Transport (MCP_TRANSPORT i .env, se mcp_transport.py):
+  stdio: MCP-klienten startar processen direkt.
+  http:  Streamable HTTP på MCP_HOST:MCP_PORT bakom Bearer-autentisering;
+         kräver MCP_API_KEY.
 """
 
 import contextlib as _contextlib
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, NotRequired, Optional, TypedDict
 
+import httpx
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
-
-import eduskunta_client as ed
-import finlex_client as fx
-import db
 
 load_dotenv(Path(__file__).parent / ".env")
+
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+import db
+import eduskunta_client as ed
+import finlex_client as fx
+from mcp_annotationer import CACHE_HINTAR, LASNING_DB, LASNING_EXTERN
+from mcp_transport import starta
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
-
-MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
-MCP_HOST      = os.getenv("MCP_HOST",      "127.0.0.1")
-MCP_PORT      = int(os.getenv("MCP_PORT",  "8005"))
-MCP_API_KEY   = os.getenv("MCP_API_KEY",   "")
 
 # Standardtak för fulltext i hämtverktygen. Materialet innehåller dokument på
 # flera miljoner tecken — utan ett tak som gäller by default kan ett anrop
@@ -67,6 +69,9 @@ EMBEDDING_MODEL_FI = os.getenv("EMBEDDING_MODEL_FI", "TurkuNLP/sbert-cased-finni
 EMBEDDING_MODEL_SV = os.getenv("EMBEDDING_MODEL_SV", "KBLab/sentence-bert-swedish-cased")
 _modell_fi = None
 _modell_sv = None
+# Synkrona verktyg körs på arbetstrådar; låset hindrar att två samtidiga
+# sökningar laddar samma modell var för sig.
+_modell_lock = threading.Lock()
 
 # Query-expansion
 QUERY_EXPANSION_ENABLED     = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
@@ -87,8 +92,10 @@ log = logging.getLogger(__name__)
 
 # ── MCP-server ─────────────────────────────────────────────────────────────────
 
-mcp = FastMCP(
+mcp = MCPServer(
     "finland",
+    version="1.2.0",
+    cache_hints=CACHE_HINTAR,
     instructions=(
         "MCP-server för finsk riksdags- och rättsdata. "
         "Täcker Eduskunta (Finlands riksdag) och Finlex (finsk lagstiftning). "
@@ -103,9 +110,156 @@ mcp = FastMCP(
         "fi_hamta_dokument och fi_hamta_lag tar därför max_tecken och fran_tecken; "
         "använd hamta_fulltext=False när bara metadata behövs, och sök riktat med "
         "fi_sok_i_dokument i stället för att läsa hela texter. "
-        "CITAT: citera aldrig ur en text där trunkerad_fi eller trunkerad_sv är true."
+        "CITAT: citera aldrig ur en text där trunkerad_fi eller trunkerad_sv är true. "
+        "VOTERINGAR: fi_hamta_aanestys läser live ur api.eduskunta.fi, som har "
+        "voteringar fr.o.m. 2008-10-17; äldre voteringar finns inte där."
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Svarstyper
+# ---------------------------------------------------------------------------
+# Nästlade poster från källorna är heterogena och historiska poster saknar
+# ofta fält, så de typas som dict[str, Any]. Skalen nedan är stabila.
+
+class _Tvasprakig(TypedDict, total=False):
+    """Fälten som _begransa_tvasprakig lägger till per språkversion."""
+    fulltext_fi: str | None
+    fulltext_sv: str | None
+    tecken_totalt_fi: int
+    tecken_totalt_sv: int
+    trunkerad_fi: bool
+    trunkerad_sv: bool
+    fortsatt_fran_tecken_fi: int | None
+    fortsatt_fran_tecken_sv: int | None
+    las_vidare: str
+
+
+class FiSokSvar(TypedDict):
+    eduskunta: list[dict[str, Any]]
+    finlex: dict[str, Any]
+    fraga: str
+    fraga_sprak: str
+    expansion: NotRequired[str]
+
+
+class EduskuntaSokSvar(TypedDict):
+    treffar: list[dict[str, Any]]
+    totalt: int
+    start_index: int
+    nasta_start_index: int | None
+    expansion: NotRequired[str]
+
+
+class FinlexSokSvar(TypedDict):
+    fi: dict[str, Any]
+    sv: dict[str, Any]
+    fraga: str
+    fraga_sprak: str
+    expansion: NotRequired[str]
+
+
+class DokumentSvar(_Tvasprakig):
+    """Svar från fi_hamta_dokument: cachepost under dokument, annars live-fält."""
+    kalla: str
+    dokument: NotRequired[dict[str, Any]]
+    edk_id: NotRequired[str | None]
+    edk_id_sv: NotRequired[str | None]
+    html_saatavilla: NotRequired[bool | None]
+    metadata: NotRequired[dict[str, Any]]
+
+
+class ArendeSvar(TypedDict):
+    eduskuntatunnus: dict[str, Any]
+    nimeke: dict[str, Any]
+    tila: dict[str, Any]
+    laadintapvm: Any
+    paattymispvm: Any
+    asiakirjatyyppi: dict[str, Any]
+    asiakirjatyyppinimi: dict[str, Any]
+    viimeisinKasittelyvaihe: dict[str, Any]
+    vaalikausi: Any
+    valtiopaivavuosi: Any
+    keskeisetAsiakirjat: list[dict[str, Any]]
+    kasittelyt: list[dict[str, Any]]
+    kasittelynAsiakirjat_antal: int
+    asiantuntijalausunnot: list[dict[str, Any]]
+
+
+class LagSvar(_Tvasprakig):
+    """Svar från fi_hamta_lag: cachepost under dokument, annars live-fält."""
+    kalla: str
+    dokument: NotRequired[dict[str, Any]]
+    metadata: NotRequired[dict[str, Any]]
+    akn_uri_fi: NotRequired[str]
+    akn_uri_sv: NotRequired[str]
+
+
+class ChunkTraff(TypedDict):
+    chunk_index: int
+    text: str | None
+    likhet: float
+
+
+class SokIDokumentSvar(TypedDict):
+    dokument_id: int
+    edk_id: str | None
+    eduskuntatunnus_fi: str | None
+    eduskuntatunnus_sv: str | None
+    kalla: str | None
+    typ: str | None
+    titel: str | None
+    ar: int | None
+    datum: str | None
+    fraga_sprak: str
+    antal_chunks: int
+    antal_traffar: int
+    traffar: list[ChunkTraff]
+
+
+class VaalikaudetSvar(TypedDict):
+    vaalikaudet: Any
+    valtiopaivat: NotRequired[Any]
+
+
+# ---------------------------------------------------------------------------
+# Fel från källorna
+# ---------------------------------------------------------------------------
+
+@_contextlib.contextmanager
+def _kallfel(kalla: str, ej_hittad: str | None = None):
+    """
+    Översätter HTTP-fel från källan till ToolError med ett begripligt meddelande.
+
+    Utan översättning får klienten bara "Error executing tool" utan orsak.
+    ej_hittad används som meddelande vid 404, då felet är ett okänt id och
+    inte ett driftfel hos källan.
+    """
+    try:
+        yield
+    except ToolError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        kod = exc.response.status_code
+        if kod == 404 and ej_hittad:
+            raise ToolError(ej_hittad) from exc
+        raise ToolError(f"{kalla} svarade med HTTP {kod}. Försök igen senare.") from exc
+    except httpx.HTTPError as exc:
+        raise ToolError(f"{kalla} svarar inte ({exc}). Försök igen senare.") from exc
+
+
+def _cacha(**falt) -> None:
+    """
+    Sparar ett hämtat dokument i den lokala cachen.
+
+    Cachen är en bekvämlighet: ett skrivfel (databasen nere eller
+    skrivskyddad) loggas men hindrar inte att svaret levereras.
+    """
+    try:
+        db.upsert_dokument(**falt)
+    except Exception as exc:
+        log.warning("Kunde inte cacha dokument: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +333,12 @@ def _hamta_modell_fi():
     """Laddar TurkuNLP-modellen lazily (skyddad mot FD 1-läckage)."""
     global _modell_fi
     if _modell_fi is None:
-        from sentence_transformers import SentenceTransformer
-        log.info("Laddar embeddingmodell (fi): %s", EMBEDDING_MODEL_FI)
-        with _tysta_stdout():
-            _modell_fi = SentenceTransformer(EMBEDDING_MODEL_FI)
+        with _modell_lock:
+            if _modell_fi is None:
+                from sentence_transformers import SentenceTransformer
+                log.info("Laddar embeddingmodell (fi): %s", EMBEDDING_MODEL_FI)
+                with _tysta_stdout():
+                    _modell_fi = SentenceTransformer(EMBEDDING_MODEL_FI)
     return _modell_fi
 
 
@@ -190,20 +346,25 @@ def _hamta_modell_sv():
     """Laddar KBLab-modellen lazily (skyddad mot FD 1-läckage)."""
     global _modell_sv
     if _modell_sv is None:
-        from sentence_transformers import SentenceTransformer
-        log.info("Laddar embeddingmodell (sv): %s", EMBEDDING_MODEL_SV)
-        with _tysta_stdout():
-            _modell_sv = SentenceTransformer(EMBEDDING_MODEL_SV)
+        with _modell_lock:
+            if _modell_sv is None:
+                from sentence_transformers import SentenceTransformer
+                log.info("Laddar embeddingmodell (sv): %s", EMBEDDING_MODEL_SV)
+                with _tysta_stdout():
+                    _modell_sv = SentenceTransformer(EMBEDDING_MODEL_SV)
     return _modell_sv
 
 
 def _embedda(text: str, sprak: str = "fi") -> list[float]:
-    """Skapar en embedding för texten med rätt modell."""
-    with _tysta_stdout():
-        if sprak == "sv":
-            vec = _hamta_modell_sv().encode(text, normalize_embeddings=True)
-        else:
-            vec = _hamta_modell_fi().encode(text, normalize_embeddings=True)
+    """Skapar en embedding för texten med rätt modell.
+
+    Bara modellinläsningen omdirigerar fd 1. Omdirigeringen gäller hela
+    processen, och verktygen körs på arbetstrådar: under tiden den är aktiv
+    skulle protokollsvar från andra anrop hamna i loggfilen. encode() skriver
+    inget till stdout när förloppsindikatorn är avstängd.
+    """
+    modell = _hamta_modell_sv() if sprak == "sv" else _hamta_modell_fi()
+    vec = modell.encode(text, normalize_embeddings=True, show_progress_bar=False)
     return vec.tolist()
 
 
@@ -344,11 +505,11 @@ def _eduskunta_treff_till_dict(r: dict) -> dict:
 # Verktyg
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(title="Sök i Eduskunta och Finlex", annotations=LASNING_EXTERN)
 def fi_sok(
     fraga: str,
     max_treff: int = 10,
-) -> dict:
+) -> FiSokSvar:
     """
     Aggregerad sökning över alla finska källor: Eduskunta och Finlex.
 
@@ -368,7 +529,8 @@ def fi_sok(
     expanderad, expansion_logg = _expandera_fraga(fraga, fraga_sprak)
 
     # Eduskunta — live-API, språkoberoende
-    ed_svar    = ed.sok(fraga=expanderad, kategori="asiakirja", max_treff=max_treff)
+    with _kallfel("Eduskuntas API"):
+        ed_svar = ed.sok(fraga=expanderad, kategori="asiakirja", max_treff=max_treff)
     ed_treffar = [_eduskunta_treff_till_dict(r) for r in ed_svar.get("results", [])]
 
     # Finlex FTS — finska och svenska parallellt
@@ -388,7 +550,7 @@ def fi_sok(
         except Exception as exc:
             log.warning("Semantisk sökning (sv) misslyckades: %s", exc)
 
-    svar = {
+    svar: FiSokSvar = {
         "eduskunta":  ed_treffar,
         "finlex": {
             "fi": {"fts": fts_fi, "semantisk": sem_fi},
@@ -402,7 +564,7 @@ def fi_sok(
     return svar
 
 
-@mcp.tool()
+@mcp.tool(title="Sök i Eduskuntas riksdagsdokument", annotations=LASNING_EXTERN)
 def fi_sok_eduskunta(
     fraga: Optional[str] = None,
     kategori: str = "asiakirja",
@@ -412,7 +574,7 @@ def fi_sok_eduskunta(
     ar: Optional[int] = None,
     max_treff: int = 10,
     start_index: int = 0,
-) -> dict:
+) -> EduskuntaSokSvar:
     """
     Strukturerad sökning i Eduskuntas riksdagsdokument (api.eduskunta.fi).
 
@@ -450,16 +612,17 @@ def fi_sok_eduskunta(
     elif len(villkor) > 1:
         expression = {"and": villkor}
 
-    ed_svar = ed.sok(
-        fraga=expanderad if fraga else None,
-        kategori=kategori,
-        max_treff=max_treff,
-        start_index=start_index,
-        expression=expression,
-    )
+    with _kallfel("Eduskuntas API"):
+        ed_svar = ed.sok(
+            fraga=expanderad if fraga else None,
+            kategori=kategori,
+            max_treff=max_treff,
+            start_index=start_index,
+            expression=expression,
+        )
 
     treffar = [_eduskunta_treff_till_dict(r) for r in ed_svar.get("results", [])]
-    svar = {
+    svar: EduskuntaSokSvar = {
         "treffar":          treffar,
         "totalt":           ed_svar.get("searchMetadata", {}).get("totalResultCount", 0),
         "start_index":      start_index,
@@ -470,14 +633,14 @@ def fi_sok_eduskunta(
     return svar
 
 
-@mcp.tool()
+@mcp.tool(title="Sök i lokala Finlex-databasen", annotations=LASNING_DB)
 def fi_sok_finlex(
     fraga: str,
     finlex_typ: Optional[str] = None,
     fran_ar: Optional[int] = None,
     till_ar: Optional[int] = None,
     max_treff: int = 10,
-) -> dict:
+) -> FinlexSokSvar:
     """
     FTS och semantisk sökning i den lokala Finlex-databasen.
 
@@ -533,7 +696,7 @@ def fi_sok_finlex(
         except Exception as exc:
             log.warning("Semantisk sökning (sv) misslyckades: %s", exc)
 
-    svar = {
+    svar: FinlexSokSvar = {
         "fi":          {"fts": fts_fi, "semantisk": sem_fi},
         "sv":          {"fts": fts_sv, "semantisk": sem_sv},
         "fraga":       fraga,
@@ -544,14 +707,14 @@ def fi_sok_finlex(
     return svar
 
 
-@mcp.tool()
+@mcp.tool(title="Hämta riksdagsdokument med fulltext", annotations=LASNING_EXTERN)
 def fi_hamta_dokument(
     edk_id: Optional[str] = None,
     eduskuntatunnus: Optional[str] = None,
     hamta_fulltext: bool = True,
     max_tecken: int = FI_MAX_TECKEN,
     fran_tecken: int = 0,
-) -> dict:
+) -> DokumentSvar:
     """
     Hämtar metadata och fulltext för ett riksdagsdokument från api.eduskunta.fi.
 
@@ -580,7 +743,7 @@ def fi_hamta_dokument(
     Minst ett av edk_id eller eduskuntatunnus måste anges.
     """
     if not edk_id and not eduskuntatunnus:
-        return {"fel": "Ange edk_id eller eduskuntatunnus"}
+        raise ToolError("Ange edk_id eller eduskuntatunnus.")
 
     # Kontrollera cache — returnera om båda fulltexterna finns (eller om fulltext inte önskas)
     cachad = None
@@ -598,14 +761,23 @@ def fi_hamta_dokument(
         return {"kalla": "cache", "dokument": cachad}
 
     # Hämta finskt primärdokument
-    try:
+    with _kallfel("Eduskuntas API"):
         if edk_id:
-            meta = ed.hamta_asiakirja_metadata(edk_id)
+            try:
+                meta = ed.hamta_asiakirja_metadata(edk_id)
+            except ValueError as exc:
+                raise ToolError(
+                    f"Inget dokument hittades för edk_id {edk_id}. "
+                    "Hämta id:t ur fi_sok_eduskunta eller ange eduskuntatunnus."
+                ) from exc
         else:
             sok_svar = ed.hamta_asiakirja_via_eduskuntatunnus(eduskuntatunnus)
             treffar = sok_svar.get("results", [])
             if not treffar:
-                return {"fel": f"Inget dokument hittades för beteckning: {eduskuntatunnus}"}
+                raise ToolError(
+                    f"Inget dokument hittades för beteckning {eduskuntatunnus}. "
+                    "Kontrollera formatet, t.ex. 'HE 15/2026 vp' eller 'RP 15/2026 rd'."
+                )
             # Välj finskt dokument som primär, annars första träffen
             fi_treff = next(
                 (r.get("asiakirja") or r for r in treffar
@@ -617,8 +789,6 @@ def fi_hamta_dokument(
             meta = {k: v for k, v in fi_treff.items()
                     if k not in ("snippet", "fullText", "fullTextSnippet")}
             edk_id = meta.get("edktunnus")
-    except Exception as exc:
-        return {"fel": f"Kunde inte hämta metadata: {exc}"}
 
     html_saatavilla = meta.get("htmlSaatavilla", False)
     fulltext_fi = None
@@ -661,8 +831,7 @@ def fi_hamta_dokument(
         except Exception as exc:
             log.warning("Kunde inte hämta sv syskondokument för %s: %s", ed_tunnus_str, exc)
 
-    # Spara i cache
-    db.upsert_dokument(
+    _cacha(
         kalla="eduskunta",
         edk_id=edk_id,
         eduskuntatunnus_fi=ed_tunnus_str,
@@ -780,10 +949,10 @@ def _sammanfatta_asiantuntijalausunnot(field) -> list[dict]:
     ]
 
 
-@mcp.tool()
+@mcp.tool(title="Hämta riksdagsärende med historik", annotations=LASNING_EXTERN)
 def fi_hamta_arende(
     tunnus: str,
-) -> dict:
+) -> ArendeSvar:
     """
     Hämtar fullständig ärendehistorik (valtiopaivaasia / statsdagsärende) från
     Eduskuntas API — ärende-metadata plus livscykel, kärnedokument,
@@ -821,53 +990,49 @@ def fi_hamta_arende(
       asiantuntijalausunnot — expertutlåtanden från utskottens hearings
                               (för djupare proceduriell analys)
 
-    Returnerar {} med 'fel'-nyckel om ärendet inte hittas.
+    Ett okänt ärende ger ett fel med exempel på giltiga format.
 
     Exempel: fi_hamta_arende(tunnus="HE 15/2026 vp")
     """
-    try:
+    ej_hittad = (
+        f"Ärendet '{tunnus}' hittades inte. Kontrollera formatet, "
+        "t.ex. 'HE 15/2026 vp' eller 'KAA 5/2024 vp'."
+    )
+    with _kallfel("Eduskuntas API", ej_hittad=ej_hittad):
         svar = ed.hamta_valtiopaivaasia(tunnus)
-        if not svar or not svar.get("eduskuntatunnus"):
-            return {
-                "fel":    f"Ärendet '{tunnus}' hittades inte.",
-                "tunnus": tunnus,
-                "tips":   "Kontrollera formatet. Exempel: 'HE 15/2026 vp', 'KAA 5/2024 vp'.",
-            }
+    if not svar or not svar.get("eduskuntatunnus"):
+        raise ToolError(ej_hittad)
 
-        # Räkna kasittelynAsiakirjat utan att kopiera hela strukturen — den kan
-        # vara djupt nästlad och innehålla många bilagor per behandlingssteg.
-        kas_dok = svar.get("kasittelynAsiakirjat", {})
-        kas_dok_antal = 0
-        if isinstance(kas_dok, dict):
-            fi_list = kas_dok.get("fi") or []
-            if isinstance(fi_list, list):
-                kas_dok_antal = sum(len(grupp) if isinstance(grupp, list) else 1
-                                    for grupp in fi_list)
+    # Räkna kasittelynAsiakirjat utan att kopiera hela strukturen — den kan
+    # vara djupt nästlad och innehålla många bilagor per behandlingssteg.
+    kas_dok = svar.get("kasittelynAsiakirjat", {})
+    kas_dok_antal = 0
+    if isinstance(kas_dok, dict):
+        fi_list = kas_dok.get("fi") or []
+        if isinstance(fi_list, list):
+            kas_dok_antal = sum(len(grupp) if isinstance(grupp, list) else 1
+                                for grupp in fi_list)
 
-        return {
-            "eduskuntatunnus":         _tvasprakigt(svar.get("eduskuntatunnus")),
-            "nimeke":                  _tvasprakigt(svar.get("nimeke")),
-            "tila":                    _tvasprakigt(svar.get("tila")),
-            "laadintapvm":             _tvasprakigt(svar.get("laadintapvm")).get("fi"),
-            "paattymispvm":            _tvasprakigt(svar.get("paattymispvm")).get("fi"),
-            "asiakirjatyyppi":         _tvasprakigt(svar.get("asiakirjatyyppikoodi")),
-            "asiakirjatyyppinimi":     _tvasprakigt(svar.get("asiakirjatyyppinimi")),
-            "viimeisinKasittelyvaihe": _tvasprakigt(svar.get("viimeisinKasittelyvaihe")),
-            "vaalikausi":              _tvasprakigt(svar.get("vaalikausitunnus")).get("fi"),
-            "valtiopaivavuosi":        _tvasprakigt(svar.get("valtiopaivavuosi")).get("fi"),
+    return {
+        "eduskuntatunnus":         _tvasprakigt(svar.get("eduskuntatunnus")),
+        "nimeke":                  _tvasprakigt(svar.get("nimeke")),
+        "tila":                    _tvasprakigt(svar.get("tila")),
+        "laadintapvm":             _tvasprakigt(svar.get("laadintapvm")).get("fi"),
+        "paattymispvm":            _tvasprakigt(svar.get("paattymispvm")).get("fi"),
+        "asiakirjatyyppi":         _tvasprakigt(svar.get("asiakirjatyyppikoodi")),
+        "asiakirjatyyppinimi":     _tvasprakigt(svar.get("asiakirjatyyppinimi")),
+        "viimeisinKasittelyvaihe": _tvasprakigt(svar.get("viimeisinKasittelyvaihe")),
+        "vaalikausi":              _tvasprakigt(svar.get("vaalikausitunnus")).get("fi"),
+        "valtiopaivavuosi":        _tvasprakigt(svar.get("valtiopaivavuosi")).get("fi"),
 
-            "keskeisetAsiakirjat":         _sammanfatta_keskeisetAsiakirjat(svar.get("keskeisetAsiakirjat")),
-            "kasittelyt":                  _sammanfatta_kasittelyt(svar.get("kasittelyt")),
-            "kasittelynAsiakirjat_antal":  kas_dok_antal,
-            "asiantuntijalausunnot":       _sammanfatta_asiantuntijalausunnot(svar.get("asiantuntijalausunnot")),
-        }
-
-    except Exception as exc:
-        log.error("fi_hamta_arende misslyckades (%s): %s", tunnus, exc)
-        return {"fel": str(exc), "tunnus": tunnus}
+        "keskeisetAsiakirjat":         _sammanfatta_keskeisetAsiakirjat(svar.get("keskeisetAsiakirjat")),
+        "kasittelyt":                  _sammanfatta_kasittelyt(svar.get("kasittelyt")),
+        "kasittelynAsiakirjat_antal":  kas_dok_antal,
+        "asiantuntijalausunnot":       _sammanfatta_asiantuntijalausunnot(svar.get("asiantuntijalausunnot")),
+    }
 
 
-@mcp.tool()
+@mcp.tool(title="Hämta lag eller proposition ur Finlex", annotations=LASNING_EXTERN)
 def fi_hamta_lag(
     ar: Optional[int] = None,
     nummer: Optional[str] = None,
@@ -877,7 +1042,7 @@ def fi_hamta_lag(
     akn_uri_fi: Optional[str] = None,
     max_tecken: int = FI_MAX_TECKEN,
     fran_tecken: int = 0,
-) -> dict:
+) -> LagSvar:
     """
     Hämtar en specifik lag, proposition eller förordning från Finlex (AKN XML).
 
@@ -931,7 +1096,7 @@ def fi_hamta_lag(
         akn_uri_fi = _bygg_uri("fin@")
         akn_uri_sv = _bygg_uri("swe@")
     else:
-        return {"fel": "Ange antingen akn_uri_fi eller både ar och nummer"}
+        raise ToolError("Ange antingen akn_uri_fi eller både ar och nummer.")
 
     # Kolla cache — returnera om båda finns
     cachad = db.hamta_dokument_via_akn_uri(akn_uri_fi)
@@ -974,7 +1139,7 @@ def fi_hamta_lag(
                 " Alla lagar har inte konsoliderad lydelse i Finlex öppna data. "
                 'Prova typ="statute" för den ursprungliga lagtexten.'
             )
-        return {"fel": fel}
+        raise ToolError(fel)
 
     # Ersätt "latest" med den version Finlex faktiskt levererade, så att
     # cacheposten och svaret pekar på en bestämd lydelse.
@@ -984,8 +1149,7 @@ def fi_hamta_lag(
         akn_uri_fi = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_FI)
         akn_uri_sv = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_SV)
 
-    # Spara i cache
-    db.upsert_dokument(
+    _cacha(
         kalla="finlex",
         akn_uri_fi=akn_uri_fi,
         akn_uri_sv=akn_uri_sv,
@@ -1070,13 +1234,13 @@ def _summarisera_aanestykset(radata: dict | list) -> dict:
     }
 
 
-@mcp.tool()
+@mcp.tool(title="Hämta voteringsresultat", annotations=LASNING_EXTERN)
 def fi_hamta_aanestys(
     aanestystunnus: Optional[str] = None,
     eduskuntatunnus: Optional[str] = None,
     istuntotunnus: Optional[str] = None,
     senaste: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """
     Hämtar voteringsresultat från Eduskunta.
 
@@ -1086,29 +1250,35 @@ def fi_hamta_aanestys(
       istuntotunnus   — alla voteringar i en session: "{vpvuosi}-{istuntonr}", t.ex. "2025-92"
       senaste         — om True returneras de 100 senaste voteringsresultaten (ignorerar övriga)
 
+    Täckning: API:t har voteringar fr.o.m. plenum 94/2008 (2008-10-17).
+    Äldre voteringar finns inte här.
+
     Minst ett argument måste anges.
     """
-    if senaste:
-        radata = ed.hamta_uusimmat_aanestykset()
-        return _summarisera_aanestykset(radata)
-    if aanestystunnus:
-        return ed.hamta_aanestys(aanestystunnus)
-    if eduskuntatunnus:
-        radata = ed.hamta_asian_aanestykset(eduskuntatunnus)
-        return _summarisera_aanestykset(radata)
-    if istuntotunnus:
-        radata = ed.hamta_istunnon_aanestykset(istuntotunnus)
-        return _summarisera_aanestykset(radata)
-    return {"fel": "Ange aanestystunnus, eduskuntatunnus, istuntotunnus eller senaste=True"}
+    ej_hittad = (
+        "Ingen votering hittades. Kontrollera formatet (t.ex. '2025-92-2', "
+        "'2025-92' eller 'HE 15/2026 vp'). Eduskuntas API har voteringar "
+        "fr.o.m. 2008-10-17; äldre voteringar finns inte där."
+    )
+    with _kallfel("Eduskuntas API", ej_hittad=ej_hittad):
+        if senaste:
+            return _summarisera_aanestykset(ed.hamta_uusimmat_aanestykset())
+        if aanestystunnus:
+            return ed.hamta_aanestys(aanestystunnus)
+        if eduskuntatunnus:
+            return _summarisera_aanestykset(ed.hamta_asian_aanestykset(eduskuntatunnus))
+        if istuntotunnus:
+            return _summarisera_aanestykset(ed.hamta_istunnon_aanestykset(istuntotunnus))
+    raise ToolError("Ange aanestystunnus, eduskuntatunnus, istuntotunnus eller senaste=True.")
 
 
-@mcp.tool()
+@mcp.tool(title="Sök semantiskt i ett dokument", annotations=LASNING_DB)
 def fi_sok_i_dokument(
     fraga: str,
     edk_id: Optional[str] = None,
     eduskuntatunnus: Optional[str] = None,
     max_treff: int = 5,
-) -> dict:
+) -> SokIDokumentSvar:
     """
     Semantisk sökning via pgvector inom ett enskilt cachat dokument.
 
@@ -1135,10 +1305,10 @@ def fi_sok_i_dokument(
       3. fi_hamta_dokument(edk_id=...) → hämta fulltext vid behov
     """
     if not edk_id and not eduskuntatunnus:
-        return {"fel": "Ange edk_id eller eduskuntatunnus."}
+        raise ToolError("Ange edk_id eller eduskuntatunnus.")
 
     if not db.ar_postgres():
-        return {"fel": "Semantisk sökning kräver PostgreSQL med pgvector — SQLite-läge stöds inte."}
+        raise ToolError("Semantisk sökning kräver PostgreSQL med pgvector; SQLite-läget stöds inte.")
 
     # Slå upp dokumentets interna id
     if edk_id:
@@ -1148,14 +1318,11 @@ def fi_sok_i_dokument(
 
     if not cachad:
         identifierare = edk_id or eduskuntatunnus
-        return {
-            "fel": (
-                f"Dokumentet '{identifierare}' finns inte i lokal cache. "
-                "Hämta det först med fi_hamta_dokument så att det indexeras."
-            ),
-            "edk_id":          edk_id,
-            "eduskuntatunnus": eduskuntatunnus,
-        }
+        raise ToolError(
+            f"Dokumentet '{identifierare}' finns inte i lokal cache. "
+            "Hämta det först med fi_hamta_dokument och kör chunkning och "
+            "embedding (03_chunka_och_embedda.py) så att det indexeras."
+        )
 
     dokument_id = cachad["id"]
 
@@ -1165,67 +1332,38 @@ def fi_sok_i_dokument(
         embedding = _embedda(fraga, sprak)
     except Exception as exc:
         log.error("fi_sok_i_dokument: embedding misslyckades: %s", exc)
-        return {"fel": f"Embedding misslyckades: {exc}"}
+        raise ToolError(f"Embeddingmodellen kunde inte köras: {exc}") from exc
 
-    return db.vektor_sok_i_dokument(
+    svar = db.vektor_sok_i_dokument(
         dokument_id=dokument_id,
         embedding=embedding,
         sprak=sprak,
         max_treff=max_treff,
     )
+    if "fel" in svar:
+        fel = svar["fel"]
+        if svar.get("antal_chunks") == 0:
+            fel += (
+                " Kör 03_chunka_och_embedda.py för att indexera dokumentet, "
+                "eller läs det med fi_hamta_dokument så länge."
+            )
+        raise ToolError(fel)
+    return svar
 
 
-@mcp.tool()
-def fi_lista_vaalikaudet(inkludera_riksmoten: bool = False) -> dict:
+@mcp.tool(title="Lista valperioder och riksmöten", annotations=LASNING_EXTERN)
+def fi_lista_vaalikaudet(inkludera_riksmoten: bool = False) -> VaalikaudetSvar:
     """
     Listar finska valperioder (fr.o.m. 1907) och optionellt riksmöten.
 
     Parametrar:
       inkludera_riksmoten — om True inkluderas alla 128+ riksmöten (fr.o.m. 1907)
     """
-    vaalikaudet = ed.hamta_vaalikaudet()
-    svar: dict = {"vaalikaudet": vaalikaudet}
-    if inkludera_riksmoten:
-        svar["valtiopaivat"] = ed.hamta_valtiopaivat()
+    with _kallfel("Eduskuntas API"):
+        svar: VaalikaudetSvar = {"vaalikaudet": ed.hamta_vaalikaudet()}
+        if inkludera_riksmoten:
+            svar["valtiopaivat"] = ed.hamta_valtiopaivat()
     return svar
-
-
-# ---------------------------------------------------------------------------
-# Uppstart
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# HTTP-autentisering
-# ---------------------------------------------------------------------------
-
-def _make_auth_app(asgi_app, api_key: str):
-    """
-    Wrappa en ASGI-app med enkel Bearer-token-autentisering.
-    Alla anrop utan korrekt Authorization-header avvisas med HTTP 401.
-    """
-    from starlette.applications import Starlette
-    from starlette.middleware import Middleware
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import PlainTextResponse
-    from starlette.routing import Mount
-
-    class ApiNyckelMellanvara(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            token = (
-                request.headers.get("Authorization", "")
-                .removeprefix("Bearer ")
-                .strip()
-            )
-            if token != api_key:
-                return PlainTextResponse(
-                    "Obehörig: ogiltig eller saknad API-nyckel.", status_code=401
-                )
-            return await call_next(request)
-
-    return Starlette(
-        routes=[Mount("/", app=asgi_app)],
-        middleware=[Middleware(ApiNyckelMellanvara)],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1234,37 +1372,4 @@ def _make_auth_app(asgi_app, api_key: str):
 
 if __name__ == "__main__":
     (_SCRIPT_DIR / "logs").mkdir(parents=True, exist_ok=True)
-
-    try:
-        db.init_db()
-    except Exception as exc:
-        log.warning("Databasinitiering misslyckades: %s — fortsätter utan DB", exc)
-
-    if MCP_TRANSPORT == "http":
-        import uvicorn
-
-        try:
-            asgi_app = mcp.streamable_http_app()
-        except AttributeError:
-            log.warning(
-                "mcp.streamable_http_app() saknas — försöker med sse_app(). "
-                "Uppgradera mcp-paketet om problem uppstår."
-            )
-            asgi_app = mcp.sse_app()
-
-        if MCP_API_KEY:
-            log.info("API-nyckelautentisering aktiverad")
-            app = _make_auth_app(asgi_app, MCP_API_KEY)
-        else:
-            log.warning(
-                "MCP_API_KEY är inte satt — servern körs utan autentisering. "
-                "Bind enbart till loopback (MCP_HOST=127.0.0.1) eller "
-                "skydda via reverse proxy."
-            )
-            app = asgi_app
-
-        log.info("Startar HTTP-transport på %s:%s", MCP_HOST, MCP_PORT)
-        uvicorn.run(app, host=MCP_HOST, port=MCP_PORT, log_level="info")
-    else:
-        log.info("Startar stdio-transport (lokal användning)")
-        mcp.run()
+    starta(mcp, standardport=8005, initiera=db.init_db)
