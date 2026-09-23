@@ -36,6 +36,7 @@ Transport (MCP_TRANSPORT i .env, se mcp_transport.py):
 import contextlib as _contextlib
 import logging
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, NotRequired, Optional, TypedDict
@@ -247,6 +248,45 @@ def _kallfel(kalla: str, ej_hittad: str | None = None):
         raise ToolError(f"{kalla} svarade med HTTP {kod}. Försök igen senare.") from exc
     except httpx.HTTPError as exc:
         raise ToolError(f"{kalla} svarar inte ({exc}). Försök igen senare.") from exc
+
+
+try:
+    import psycopg2 as _psycopg2
+    _DB_FEL: tuple[type[Exception], ...] = (sqlite3.Error, _psycopg2.Error)
+except ImportError:
+    _DB_FEL = (sqlite3.Error,)
+
+
+@_contextlib.contextmanager
+def _dbfel():
+    """
+    Översätter databasfel till ToolError med orsak.
+
+    Ett okänt undantag når klienten som "Error executing tool" utan orsak;
+    ett nedstängt Postgres ska i stället synas som just det.
+    """
+    try:
+        yield
+    except _DB_FEL as exc:
+        orsak = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        raise ToolError(
+            f"Den lokala databasen svarar inte ({orsak}). Kontrollera att databasen "
+            "i DATABASE_URL är igång och att schemat är initierat."
+        ) from exc
+
+
+def _las_cache(hamta, nyckel: str) -> dict | None:
+    """
+    Läser en cachepost; ett databasfel ger None så att anroparen hämtar live.
+
+    Cachen är en genväg, inte en förutsättning för verktyg som kan hämta
+    direkt från källan.
+    """
+    try:
+        return hamta(nyckel)
+    except _DB_FEL as exc:
+        log.warning("Cacheläsning misslyckades, hämtar live: %s", exc)
+        return None
 
 
 def _cacha(**falt) -> None:
@@ -534,8 +574,9 @@ def fi_sok(
     ed_treffar = [_eduskunta_treff_till_dict(r) for r in ed_svar.get("results", [])]
 
     # Finlex FTS — finska och svenska parallellt
-    fts_fi = db.fts_sok(fraga=expanderad, sprak="fi", kalla_filter="finlex", max_treff=max_treff)
-    fts_sv = db.fts_sok(fraga=expanderad, sprak="sv", kalla_filter="finlex", max_treff=max_treff)
+    with _dbfel():
+        fts_fi = db.fts_sok(fraga=expanderad, sprak="fi", kalla_filter="finlex", max_treff=max_treff)
+        fts_sv = db.fts_sok(fraga=expanderad, sprak="sv", kalla_filter="finlex", max_treff=max_treff)
 
     # Semantisk sökning — båda embeddingmodellerna
     sem_fi: list = []
@@ -668,16 +709,17 @@ def fi_sok_finlex(
     expanderad, expansion_logg = _expandera_fraga(fraga, fraga_sprak)
 
     # FTS — båda språken
-    fts_fi = db.fts_sok(
-        fraga=expanderad, sprak="fi",
-        kalla_filter="finlex", typ_filter=finlex_typ, ar_filter=fran_ar,
-        max_treff=max_treff,
-    )
-    fts_sv = db.fts_sok(
-        fraga=expanderad, sprak="sv",
-        kalla_filter="finlex", typ_filter=finlex_typ, ar_filter=fran_ar,
-        max_treff=max_treff,
-    )
+    with _dbfel():
+        fts_fi = db.fts_sok(
+            fraga=expanderad, sprak="fi",
+            kalla_filter="finlex", typ_filter=finlex_typ, ar_filter=fran_ar,
+            max_treff=max_treff,
+        )
+        fts_sv = db.fts_sok(
+            fraga=expanderad, sprak="sv",
+            kalla_filter="finlex", typ_filter=finlex_typ, ar_filter=fran_ar,
+            max_treff=max_treff,
+        )
 
     # Semantisk sökning — båda embeddingmodellerna
     sem_fi: list = []
@@ -746,11 +788,10 @@ def fi_hamta_dokument(
         raise ToolError("Ange edk_id eller eduskuntatunnus.")
 
     # Kontrollera cache — returnera om båda fulltexterna finns (eller om fulltext inte önskas)
-    cachad = None
     if edk_id:
-        cachad = db.hamta_dokument_via_edk_id(edk_id)
-    elif eduskuntatunnus:
-        cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
+        cachad = _las_cache(db.hamta_dokument_via_edk_id, edk_id)
+    else:
+        cachad = _las_cache(db.hamta_dokument_via_eduskuntatunnus, eduskuntatunnus)
     if cachad and (not hamta_fulltext or
                    (cachad.get("fulltext_fi") and cachad.get("fulltext_sv"))):
         if not hamta_fulltext:
@@ -1099,7 +1140,7 @@ def fi_hamta_lag(
         raise ToolError("Ange antingen akn_uri_fi eller både ar och nummer.")
 
     # Kolla cache — returnera om båda finns
-    cachad = db.hamta_dokument_via_akn_uri(akn_uri_fi)
+    cachad = _las_cache(db.hamta_dokument_via_akn_uri, akn_uri_fi)
     if cachad and cachad.get("fulltext_fi") and cachad.get("fulltext_sv"):
         # Trunkera i cachad-dicten själv. Att lägga kapade kopior bredvid en
         # orörd dokument-post hjälper inte — hela texten följer ändå med i svaret.
@@ -1319,10 +1360,11 @@ def fi_sok_i_dokument(
         raise ToolError("Semantisk sökning kräver PostgreSQL med pgvector; SQLite-läget stöds inte.")
 
     # Slå upp dokumentets interna id
-    if edk_id:
-        cachad = db.hamta_dokument_via_edk_id(edk_id)
-    else:
-        cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
+    with _dbfel():
+        if edk_id:
+            cachad = db.hamta_dokument_via_edk_id(edk_id)
+        else:
+            cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
 
     if not cachad:
         identifierare = edk_id or eduskuntatunnus
@@ -1342,12 +1384,13 @@ def fi_sok_i_dokument(
         log.error("fi_sok_i_dokument: embedding misslyckades: %s", exc)
         raise ToolError(f"Embeddingmodellen kunde inte köras: {exc}") from exc
 
-    svar = db.vektor_sok_i_dokument(
-        dokument_id=dokument_id,
-        embedding=embedding,
-        sprak=sprak,
-        max_treff=max_treff,
-    )
+    with _dbfel():
+        svar = db.vektor_sok_i_dokument(
+            dokument_id=dokument_id,
+            embedding=embedding,
+            sprak=sprak,
+            max_treff=max_treff,
+        )
     if "fel" in svar:
         fel = svar["fel"]
         if svar.get("antal_chunks") == 0:

@@ -53,8 +53,10 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   tokenhinkarna i API-klienterna och kring skapandet av Postgres-poolen. SQLite får en
   anslutning per tråd. Omdirigeringen av fd 1 gäller bara modellinläsningen, så att
   samtidiga protokollsvar inte hamnar i loggfilen.
-- En cacheskrivning som misslyckas fäller inte längre svaret från `fi_hamta_dokument`
-  och `fi_hamta_lag`.
+- En cacheskrivning eller cacheläsning som misslyckas fäller inte längre
+  `fi_hamta_dokument` och `fi_hamta_lag`; de hämtar då live från källan.
+- Databasfel i `fi_sok`, `fi_sok_finlex` och `fi_sok_i_dokument` ger ett felmeddelande
+  med orsak (t.ex. att Postgres inte svarar) i stället för ett fel utan förklaring.
 
 ### Borttaget
 
