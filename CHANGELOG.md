@@ -59,6 +59,10 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Tillagt
 
+- `06_konvertera_vektorer.py` byter en befintlig databas till `halfvec(768)` och bygger
+  HNSW-index. `--torrkorning` visar uppskattad tid, diskbehov under omskrivningen,
+  rekommenderat `maintenance_work_mem` och slutstorlek. `--kolumn fi|sv` konverterar en
+  kolumn i taget; standard är båda i samma omskrivning. `--bara-index` bygger om index.
 - **Verktyget `fi_sok_voteringar_lokalt`** läser de lokalt lagrade voteringarna
   (tabellen `voteringar`, 1996–2014 ur `avoindata.eduskunta.fi`), bland dem de före
   2008-10-17 som saknas i Eduskuntas nya API. Filter på rubrik (finska och svenska),
