@@ -74,11 +74,9 @@ CREATE TABLE IF NOT EXISTS finland.chunks (
 
 CREATE INDEX IF NOT EXISTS idx_finland_chunks_dok ON finland.chunks (dokument_id);
 
--- Vektorindex (IVFFlat — skapas när data finns)
--- CREATE INDEX IF NOT EXISTS idx_finland_chunks_emb_fi ON finland.chunks
---     USING ivfflat (embedding_fi vector_cosine_ops) WITH (lists = 100);
--- CREATE INDEX IF NOT EXISTS idx_finland_chunks_emb_sv ON finland.chunks
---     USING ivfflat (embedding_sv vector_cosine_ops) WITH (lists = 100);
+-- Vektorindex (HNSW) byggs av db.py när tabellen konverterats till halfvec,
+-- se db._migrera_halfvec, 03_chunka_och_embedda.py --bygg-index och
+-- 06_konvertera_vektorer.py.
 
 -- ─── Voteringar ─────────────────────────────────────────────────────────────
 

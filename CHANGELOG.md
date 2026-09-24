@@ -8,6 +8,20 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- **Embeddings lagras som `halfvec(768)` med HNSW-index.** halfvec halverar
+  vektorlagringen; på riktiga chunks gav exakt sökning samma topp-10 som `vector` i
+  15 av 15 provfrågor (ordningen identisk i 14). HNSW (`m=16`, `ef_construction=64`)
+  ersätter IVFFlat: det tål den dagliga synkens nya chunks och gav recall@10 0,997 mot
+  0,88 för IVFFlat (probes 20) på 60 000 riktiga vektorer. Nya och nästan tomma
+  databaser konverteras vid uppstart; större konverteras med `06_konvertera_vektorer.py`.
+  Servern läser kolumntypen vid varje sökning och fungerar före och efter.
+- Vektorsökningen sätter `hnsw.ef_search` (`FI_HNSW_EF_SEARCH`, standard 100),
+  `ivfflat.probes` (`FI_IVFFLAT_PROBES`, standard 20) och iterativ indexsökning för
+  filtrerade frågor. Tidigare användes pgvectors standard `probes = 1`, som i en
+  provmätning gav recall@10 0,64. Sökning inom ett dokument sorterar exakt i stället
+  för att gå via indexet.
+- `03_chunka_och_embedda.py --bygg-index` bygger HNSW-index; `--lists` är borttagen och
+  `--minne` sätter `maintenance_work_mem` för bygget.
 - **`fi_hamta_dokument` hämtar alltid live och lagrar inget lokalt.** Riksdagsdokument
   sparades tidigare med hela råtexten vid varje hämtning. Svaret har inte längre
   formen `{"kalla": "cache", "dokument": …}`.

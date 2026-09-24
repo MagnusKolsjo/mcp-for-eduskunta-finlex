@@ -31,7 +31,7 @@ Användning:
   python3 03_chunka_och_embedda.py --sprak fi         # Bara finska embeddings
   python3 03_chunka_och_embedda.py --sprak sv         # Bara svenska embeddings
   python3 03_chunka_och_embedda.py --tvinga           # Återskapa befintliga chunks
-  python3 03_chunka_och_embedda.py --bygg-index       # Bygg IVFFlat- och FTS-index efteråt
+  python3 03_chunka_och_embedda.py --bygg-index       # Bygg HNSW- och FTS-index efteråt
   python3 03_chunka_och_embedda.py --behall-fulltext  # Behåll råtexten i dokument
 """
 
@@ -366,58 +366,29 @@ def kor_embedding(
 
 
 # ---------------------------------------------------------------------------
-# IVFFlat-index
+# Index
 # ---------------------------------------------------------------------------
 
-def bygg_ivfflat_index(lists: int = 100):
+def bygg_index(minne: str | None = None):
     """
-    Bygger IVFFlat-index för ANN-sökning i finland.chunks.
+    Bygger om vektorindexen (HNSW) och skapar fulltextindexen på chunks.
 
-    Bygger separata index för embedding_fi och embedding_sv.
-    Ska köras EFTER att data laddats in. Bygg om när >20 % ny data tillkommer.
-
-    Rekommenderat lists-värde: sqrt(antal_rader).
-      <10k chunks  → 100
-      ~100k chunks → 316
-      ~500k chunks → 707
+    Vektorindexen byggs om från grunden; kör efter större inläsningar. HNSW tål
+    senare inskrivningar, så det behövs inte efter varje daglig synk.
     """
-    from db import pg_anslutning, pg_returnera
-
-    log.info("Bygger IVFFlat-index för finland.chunks (lists=%d)...", lists)
-    conn = pg_anslutning()
-    try:
-        for emb_kol, index_namn in [
-            ("embedding_fi", "idx_finland_chunks_emb_fi"),
-            ("embedding_sv", "idx_finland_chunks_emb_sv"),
-        ]:
-            # Kontrollera att det finns data att indexera
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT COUNT(*) FROM finland.chunks WHERE {emb_kol} IS NOT NULL"
-                )
-                antal = cur.fetchone()[0]
-
-            if antal < 10:
-                log.info("Hoppar %s — för få rader (%d) för IVFFlat.", index_namn, antal)
-                continue
-
-            log.info("Bygger %s (%d rader, lists=%d)...", index_namn, antal, lists)
-            with conn.cursor() as cur:
-                cur.execute(f"DROP INDEX IF EXISTS {index_namn}")
-                cur.execute(
-                    f"""
-                    CREATE INDEX {index_namn} ON finland.chunks
-                        USING ivfflat ({emb_kol} vector_cosine_ops)
-                        WITH (lists = {lists})
-                    """
-                )
-            conn.commit()
-            log.info("%s byggt.", index_namn)
-    finally:
-        pg_returnera(conn)
-
-    log.info("IVFFlat-index klara.")
     import db
+
+    for sprak in ("fi", "sv"):
+        kol = "embedding_fi" if sprak == "fi" else "embedding_sv"
+        with db._cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM finland.chunks WHERE {kol} IS NOT NULL")
+            antal = cur.fetchone()[0]
+        if antal == 0:
+            log.info("Hoppar vektorindex för %s — inga embeddings.", sprak)
+            continue
+        log.info("Bygger HNSW-index för %s (%d rader)...", kol, antal)
+        db.bygg_vektorindex(sprak, minne=minne)
+    log.info("Vektorindex klara.")
     db.skapa_chunk_fts_index()
     log.info("Fulltextindex på chunks klara.")
 
@@ -455,18 +426,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bygg-index",
         action="store_true",
-        help="Bygg IVFFlat-index och fulltextindex på chunks efter embedding",
+        help="Bygg HNSW-vektorindex och fulltextindex på chunks efter embedding",
+    )
+    parser.add_argument(
+        "--minne",
+        default=None,
+        help="maintenance_work_mem för indexbygget, t.ex. 6GB (snabbare HNSW-bygge)",
     )
     parser.add_argument(
         "--behall-fulltext",
         action="store_true",
         help="Behåll dokumentens råtext i finland.dokument efter chunkning",
-    )
-    parser.add_argument(
-        "--lists",
-        type=int,
-        default=100,
-        help="IVFFlat lists-parameter (standard 100, rekommenderat: sqrt(antal_chunks))",
     )
     args = parser.parse_args()
 
@@ -491,4 +461,4 @@ if __name__ == "__main__":
     print()
 
     if args.bygg_index:
-        bygg_ivfflat_index(args.lists)
+        bygg_index(args.minne)
