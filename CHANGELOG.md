@@ -40,6 +40,10 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   `fi_sok_finlex` söker då i chunks; utan indexen fungerar sökningen som förut.
   Saknas råtexten hämtar skriptet texten live från källan, så dokument kan chunkas om.
   Chunkningen ligger i `chunkning.py` och live-hämtningen i `texthamtning.py`.
+- `05_rensa_fulltext.py` tar bort redundant råtext ur en befintlig databas: för varje
+  dokument och språk där alla chunks har embedding. Skapar först fulltextindexen på
+  chunks. `--torrkorning` visar hur mycket som frigörs utan att ändra något;
+  `--vacuum-full` lämnar tillbaka utrymmet till filsystemet (låser `finland.dokument`).
 
 ### Fixat
 
