@@ -64,8 +64,12 @@ Bygg chunks och embeddings (kör efter avslutad synk):
 
 ```
 python3 03_chunka_och_embedda.py --sprak bada --tvinga
-python3 03_chunka_och_embedda.py --bygg-index
+python3 03_chunka_och_embedda.py --bygg-index --minne 8GB
 ```
+
+`--bygg-index` bygger HNSW-index för embeddings och fulltextindex på chunks.
+HNSW-bygget går mycket snabbare när grafen ryms i `maintenance_work_mem`:
+räkna med drygt 2 kB per chunk och språk.
 
 Voteringshistorik 1996–2014 (valfritt, se nedan):
 
@@ -92,6 +96,34 @@ Med `MCP_TRANSPORT=http` startar servern Streamable HTTP på
 Varje anrop kräver `Authorization: Bearer <MCP_API_KEY>`: saknad header ger
 401 och fel nyckel 403. Utan `MCP_API_KEY` startar servern inte i http-läge
 (exitkod 2). SSE stöds inte.
+
+## Uppgradering av en befintlig installation (från 1.2.0)
+
+Ordningen spelar roll; stegen 3–5 ändrar databasen och kan ta tid.
+
+1. Installera den nya koden och `requirements.txt` (mcp 2.x) och starta servern
+   en gång. Uppstarten lägger till chunkens offsetkolumner. Lagrar databasen
+   embeddings som `vector` loggas att `06_konvertera_vektorer.py` behövs; servern
+   fungerar ändå.
+2. Kör den första inkrementella Finlex-synken från en tidpunkt före förra
+   fullständiga synken, så att ändringar i äldre lagar sedan dess kommer med:
+
+   ```
+   python3 01_synka_finlex.py --sedan 2026-05-01
+   ```
+
+   Senare körningar (även den dagliga) behöver ingen flagga; de fortsätter från
+   förra lyckade körningen.
+3. Chunka och embedda det som saknas: `python3 03_chunka_och_embedda.py`.
+4. Rensa redundant råtext (skapar också fulltextindexen på chunks):
+   `python3 05_rensa_fulltext.py --torrkorning`, därefter
+   `python3 05_rensa_fulltext.py --vacuum-full`.
+5. Byt vektorlagringen till `halfvec` med HNSW-index:
+   `python3 06_konvertera_vektorer.py --torrkorning`, därefter
+   `python3 06_konvertera_vektorer.py --minne 8GB`. Tabellen `finland.chunks` är
+   låst under omskrivningen; semantiska sökningar väntar till den är klar.
+6. Synka voteringshistoriken på nytt om den ska finnas lokalt:
+   `python3 02_synka_voteringar_historik.py`.
 
 ## Voteringshistorik 1996–2014
 
