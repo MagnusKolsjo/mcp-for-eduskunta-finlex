@@ -209,7 +209,7 @@ class ChunkTraff(TypedDict):
 
 
 class SokIDokumentSvar(TypedDict):
-    dokument_id: int
+    dokument_id: int | None
     edk_id: str | None
     eduskuntatunnus_fi: str | None
     eduskuntatunnus_sv: str | None
@@ -1335,12 +1335,16 @@ def fi_hamta_aanestys(
 FI_MAX_CHUNKS_LIVE = int(os.getenv("FI_MAX_CHUNKS_LIVE", "1500"))
 
 
-def _indexera_eduskunta(edk_id: str | None, eduskuntatunnus: str | None, sprak: str) -> int:
+def _indexera_eduskunta(
+    edk_id: str | None, eduskuntatunnus: str | None, sprak: str, spara: bool = True,
+) -> dict[str, Any]:
     """
     Hämtar ett riksdagsdokument live, chunkar och embeddar det på ett språk.
 
     Sparar dokumentets metadata och chunks (text, embedding, offsets), inte
-    råtexten. Returnerar dokumentets id i databasen.
+    råtexten. Går lagringen inte (SQLite, skrivskyddad eller nere databas)
+    returneras styckena ändå, så att sökningen kan göras i minnet.
+    Returnerar {dok_id (None om ej sparat), meta, chunks, embeddings}.
     """
     from chunkning import chunka_text
 
@@ -1395,7 +1399,19 @@ def _indexera_eduskunta(edk_id: str | None, eduskuntatunnus: str | None, sprak: 
     embeddings = modell.encode(texter, batch_size=32, normalize_embeddings=True,
                                show_progress_bar=False)
 
-    with _dbfel():
+    info = {
+        "dok_id": None, "chunks": chunks, "embeddings": embeddings,
+        "meta": {
+            "edk_id": edk_fi, "eduskuntatunnus_fi": tunnus,
+            "eduskuntatunnus_sv": None, "kalla": "eduskunta",
+            "typ": meta.get("asiakirjatyyppikoodi"), "titel": titel,
+            "ar": int(meta["valtiopaivavuosi"]) if meta.get("valtiopaivavuosi") else None,
+            "datum": meta.get("laadintapvm"),
+        },
+    }
+    if not spara:
+        return info
+    try:
         dok_id = db.upsert_dokument(
             kalla="eduskunta",
             edk_id=edk_fi,
@@ -1410,8 +1426,35 @@ def _indexera_eduskunta(edk_id: str | None, eduskuntatunnus: str | None, sprak: 
         if not dok_id or dok_id < 0:
             dok_id = db.hamta_dokument_via_edk_id(edk_fi)["id"]
         db.spara_chunks(dok_id, chunks, embeddings, sprak)
+    except _DB_FEL as exc:
+        log.warning("Kunde inte spara index för %s, söker i minnet: %s", edk_fi, exc)
+        return info
     log.info("Indexerade %s (%s): %d stycken", edk_fi, sprak, len(chunks))
-    return dok_id
+    info["dok_id"] = dok_id
+    return info
+
+
+def _sok_i_minnet(info: dict[str, Any], embedding: list[float], sprak: str, max_treff: int) -> dict[str, Any]:
+    """Cosinuslikhet mot ett nyss embeddat dokument som inte kunde sparas."""
+    import numpy as np
+    likhet = np.asarray(info["embeddings"]) @ np.asarray(embedding)
+    basta = np.argsort(-likhet)[:max_treff]
+    chunks = info["chunks"]
+    traffar = [
+        {
+            "chunk_index":  chunks[i]["chunk_index"],
+            "text":         chunks[i]["text"],
+            "likhet":       round(float(likhet[i]), 4),
+            "tecken_start": chunks[i].get("tecken_start"),
+            "tecken_slut":  chunks[i].get("tecken_slut"),
+        }
+        for i in basta
+    ]
+    return {
+        "dokument_id": None, **info["meta"],
+        "fraga_sprak": sprak, "antal_chunks": len(chunks),
+        "antal_traffar": len(traffar), "traffar": traffar,
+    }
 
 
 @mcp.tool(title="Sök semantiskt i ett dokument", annotations=LASNING_EXTERN)
@@ -1422,13 +1465,14 @@ def fi_sok_i_dokument(
     max_treff: int = 5,
 ) -> SokIDokumentSvar:
     """
-    Semantisk sökning via pgvector inom ett enskilt riksdagsdokument.
+    Semantisk sökning inom ett enskilt riksdagsdokument.
 
     Används för att hitta specifika stycken utan att läsa hela fulltexten.
-    Kräver PostgreSQL med pgvector. Är dokumentet inte indexerat på frågans
-    språk hämtas det live, delas i stycken och embeddas vid första sökningen
-    (tar från några sekunder upp till någon minut för mycket långa dokument);
-    därefter finns styckena lokalt. Dokumentets råtext sparas inte.
+    Är dokumentet inte indexerat på frågans språk hämtas det live, delas i
+    stycken och embeddas vid första sökningen (några sekunder upp till någon
+    minut för mycket långa dokument). Med PostgreSQL och pgvector sparas
+    styckena så att nästa sökning går direkt; annars görs sökningen i minnet
+    och dokument_id är null. Dokumentets råtext sparas aldrig.
 
     Parametrar:
       fraga           — vad du söker efter, på finska eller svenska
@@ -1452,25 +1496,31 @@ def fi_sok_i_dokument(
     if not edk_id and not eduskuntatunnus:
         raise ToolError("Ange edk_id eller eduskuntatunnus.")
 
-    if not db.ar_postgres():
-        raise ToolError("Semantisk sökning kräver PostgreSQL med pgvector; SQLite-läget stöds inte.")
-
     sprak = _detektera_sprak(fraga)
 
     # Slå upp dokumentet; indexera det live om det saknas på frågans språk.
-    with _dbfel():
-        if edk_id:
-            cachad = db.hamta_dokument_via_edk_id(edk_id)
-        else:
-            cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
-        klart = bool(cachad) and db.antal_chunks_med_embedding(cachad["id"], sprak) > 0
-    dokument_id = cachad["id"] if klart else _indexera_eduskunta(edk_id, eduskuntatunnus, sprak)
+    cachad, klart = None, False
+    if db.ar_postgres():
+        try:
+            if edk_id:
+                cachad = db.hamta_dokument_via_edk_id(edk_id)
+            else:
+                cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
+            klart = bool(cachad) and db.antal_chunks_med_embedding(cachad["id"], sprak) > 0
+        except _DB_FEL as exc:
+            log.warning("Uppslag i lokala indexet misslyckades, indexerar live: %s", exc)
+    info = None if klart else _indexera_eduskunta(
+        edk_id, eduskuntatunnus, sprak, spara=db.ar_postgres())
 
     try:
         embedding = _embedda(fraga, sprak)
     except Exception as exc:
         log.error("fi_sok_i_dokument: embedding misslyckades: %s", exc)
         raise ToolError(f"Embeddingmodellen kunde inte köras: {exc}") from exc
+
+    if info is not None and info["dok_id"] is None:
+        return _sok_i_minnet(info, embedding, sprak, max_treff)
+    dokument_id = cachad["id"] if klart else info["dok_id"]
 
     with _dbfel():
         svar = db.vektor_sok_i_dokument(

@@ -16,7 +16,8 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   metadata, chunks och embeddings sparas. Träffarna bär `tecken_start`/`tecken_slut` i
   texten från `fi_hamta_dokument`. Taket `FI_MAX_CHUNKS_LIVE` (standard 1 500 stycken)
   begränsar hur stora dokument som indexeras i ett anrop. Annotationen är nu läsning mot
-  källa (öppen värld).
+  källa (öppen värld). Kan indexet inte sparas (SQLite, skrivskyddad eller nere
+  databas) görs sökningen i minnet och `dokument_id` är `null`.
 - `fi_hamta_lag` sparar bara metadata; lagtexten hämtas live från Finlex.
 - POST-anrop mot Eduskunta (sökning) stryps trådsäkert under källans tak, 450 per
   3000 s och IP (`EDUSKUNTA_POST_PER_3000S`, `EDUSKUNTA_POST_SKUR`).
