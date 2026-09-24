@@ -9,12 +9,13 @@ Exponerar följande verktyg:
   fi_sok              — Aggregerad sökning över alla finska källor (fanout)
   fi_sok_eduskunta    — Strukturerad sökning i riksdagsdokument (api.eduskunta.fi)
   fi_sok_finlex       — FTS + semantisk sökning i lokal Finlex-databas
-  fi_sok_i_dokument   — Semantisk sökning via pgvector inom ett enskilt cachat dokument
+  fi_sok_i_dokument   — Semantisk sökning inom ett riksdagsdokument (indexeras live)
   fi_hamta_dokument   — Hämtar fulltext via edktunnus eller eduskuntatunnus
   fi_hamta_arende     — Ärendelivscykel, kärnedokument och expertutlåtanden
   fi_hamta_lag        — Hämtar specifik lag/proposition från Finlex (AKN XML)
   fi_hamta_aanestys   — Voteringsresultat
   fi_lista_vaalikaudet — Valperioder och riksmöten (fr.o.m. 1907)
+  fi_sok_voteringar_lokalt — Lokalt lagrade voteringar 1996–2014
 
 Datakällor:
   api.eduskunta.fi       — Eduskuntas öppna API (sökning, fulltext, voteringar)
@@ -113,7 +114,9 @@ mcp = MCPServer(
         "fi_sok_i_dokument i stället för att läsa hela texter. "
         "CITAT: citera aldrig ur en text där trunkerad_fi eller trunkerad_sv är true. "
         "VOTERINGAR: fi_hamta_aanestys läser live ur api.eduskunta.fi, som har "
-        "voteringar fr.o.m. 2008-10-17; äldre voteringar finns inte där."
+        "voteringar fr.o.m. 2008-10-17; äldre voteringar finns inte där. "
+        "fi_sok_voteringar_lokalt söker i lokalt lagrade voteringar 1996–2014 "
+        "(synkad kopia; svaret anger synkdatum)."
     ),
 )
 

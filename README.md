@@ -1,6 +1,6 @@
 # MCP-server för finsk riksdags- och rättsdata
 
-MCP-server (Model Context Protocol) som ger AI-verktyg tillgång till finska riksdags- och rättsdata via nio verktyg med prefixet `fi_`.
+MCP-server (Model Context Protocol) som ger AI-verktyg tillgång till finska riksdags- och rättsdata via tio verktyg med prefixet `fi_`.
 
 ## Datakällor
 
@@ -19,12 +19,13 @@ Finlands tvåspråkiga lagstiftning finns på finska (`fin@`) och svenska (`swe@
 | `fi_sok` | Aggregerad sökning över Eduskunta och Finlex |
 | `fi_sok_eduskunta` | Strukturerad sökning i riksdagsdokument |
 | `fi_sok_finlex` | FTS och semantisk sökning i lokal Finlex-databas |
-| `fi_sok_i_dokument` | Semantisk sökning i ett enskilt chunkat och embeddat dokument |
+| `fi_sok_i_dokument` | Semantisk sökning i ett riksdagsdokument; indexeras live vid första sökningen |
 | `fi_hamta_dokument` | Hämtar fulltext för ett riksdagsdokument via edktunnus eller riksdagsbeteckning (`max_tecken`, `fran_tecken`) |
 | `fi_hamta_arende` | Hämtar ett riksdagsärende (valtiopäiväasia) med tillhörande dokument via ärendenummer |
 | `fi_hamta_lag` | Hämtar specifik lag eller proposition från Finlex via AKN URI eller år+nummer; `typ="statute-consolidated"` ger senaste konsoliderade lydelsen (`max_tecken`, `fran_tecken`) |
 | `fi_hamta_aanestys` | Voteringsresultat live ur Eduskunta Public API (fr.o.m. 2008-10-17) |
 | `fi_lista_vaalikaudet` | Valperioder och riksmöten (fr.o.m. 1907) |
+| `fi_sok_voteringar_lokalt` | Lokalt lagrade voteringar 1996–2014 (synkad kopia, se nedan) |
 
 ## Krav
 
@@ -51,7 +52,9 @@ Redigera `.env` och ange korrekt `DATABASE_URL`.
 
 **3. Initiera databas och kör synkskript**
 
-Initial synk av Finlex-lagstiftning (kan ta flera dagar):
+Initial synk av Finlex-lagstiftning (kan ta flera dagar). Därefter räcker
+`python3 01_synka_finlex.py` utan flaggor: den hämtar det som publicerats eller
+ändrats sedan förra lyckade körningen (Finlex `publishedSince`).
 
 ```
 python3 01_synka_finlex.py --alla
@@ -98,8 +101,8 @@ nya API:t.
 
 `02_synka_voteringar_historik.py` hämtar i stället hela perioden 1996–2014 ur
 Eduskuntas gamla datatjänst `avoindata.eduskunta.fi` (tabellen `SaliDBAanestys`)
-till tabellen `voteringar` i den lokala databasen. Inget MCP-verktyg läser
-tabellen; den är ett lokalt arkiv för egna frågor mot databasen.
+till tabellen `voteringar` i den lokala databasen. Verktyget
+`fi_sok_voteringar_lokalt` söker i den och anger synkdatum och täckning.
 
 - Eduskunta anger att materialet i den gamla tjänsten flyttas till den nya
   vid utgången av 2026. Något datum för nedstängning är inte angivet, och
@@ -112,6 +115,33 @@ tabellen; den är ett lokalt arkiv för egna frågor mot databasen.
   Den rapporterar aldrig en lyckad körning med noll rader.
 - `--max-sidor N` begränsar en provkörning; `--fran-sida N` återupptar en
   avbruten synk.
+
+## Lokal lagring
+
+Servern hämtar dokument live när de ska läsas: riksdagsdokument från Eduskunta
+Public API och lagtext från Finlex (konsoliderad lydelse via versionen `latest`).
+Lokalt lagras bara det som behövs för sökningen i databasen:
+
+- metadata per dokument,
+- chunks (textstycken) med embeddings och sin position i texten
+  (`tecken_start`/`tecken_slut` per språk),
+- fulltextindex på chunks (skapas av `03_chunka_och_embedda.py --bygg-index`).
+
+Synken lagrar texten tillfälligt tills den chunkats; när fulltextindexen på chunks
+finns tar `03_chunka_och_embedda.py` bort råtexten efter embedding
+(`--behall-fulltext` stänger av det). Riksdagsdokument indexeras vid den första
+semantiska sökningen i dem (`fi_sok_i_dokument`); taket `FI_MAX_CHUNKS_LIVE`
+begränsar storleken.
+
+En befintlig databas med lagrad råtext rensas med ett separat steg:
+
+```
+python3 05_rensa_fulltext.py --torrkorning   # visar vad som frigörs
+python3 05_rensa_fulltext.py --vacuum-full   # rensar och lämnar tillbaka utrymmet
+```
+
+Fritextsökning i riksdagsdokument går alltid mot Eduskuntas eget sök-API. Dess
+POST-anrop stryps under källans tak, 450 per 3000 sekunder och IP-adress.
 
 ## Tvåspråkig sökning
 
