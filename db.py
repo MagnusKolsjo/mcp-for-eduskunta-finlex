@@ -965,6 +965,83 @@ def upsert_votering(
         ))
 
 
+def sok_voteringar(
+    fraga: Optional[str] = None,
+    fran_datum: Optional[str] = None,
+    till_datum: Optional[str] = None,
+    vp_ar: Optional[int] = None,
+    istunto_nr: Optional[int] = None,
+    aanestys_id: Optional[str] = None,
+    max_treff: int = 20,
+    start_index: int = 0,
+) -> dict:
+    """
+    Söker bland lokalt lagrade voteringar.
+
+    fraga matchar delsträngar i otsikko_fi och otsikko_sv utan hänsyn till
+    versaler; flera ord separerade med komma ger OR. Returnerar
+    {totalt, voteringar, tackning: {fran, till, antal}}.
+    """
+    p, t = _ph(), _prefix()
+    villkor: list[str] = []
+    params: list = []
+    termer = [x.strip().lower() for x in (fraga or "").split(",") if x.strip()]
+    if termer:
+        villkor.append("(" + " OR ".join(
+            [f"(lower(coalesce(otsikko_fi,'')) LIKE {p} OR lower(coalesce(otsikko_sv,'')) LIKE {p})"]
+            * len(termer)) + ")")
+        for term in termer:
+            params += [f"%{term}%", f"%{term}%"]
+    if fran_datum:
+        villkor.append(f"datum >= {p}")
+        params.append(fran_datum)
+    if till_datum:
+        villkor.append(f"datum <= {p}")
+        params.append(till_datum)
+    if vp_ar is not None:
+        villkor.append(f"vp_ar = {p}")
+        params.append(vp_ar)
+    if istunto_nr is not None:
+        villkor.append(f"istunto_nr = {p}")
+        params.append(istunto_nr)
+    if aanestys_id:
+        villkor.append(f"aanestys_id = {p}")
+        params.append(aanestys_id)
+    where = ("WHERE " + " AND ".join(villkor)) if villkor else ""
+
+    with _cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {t}voteringar {where}", params)
+        totalt = cur.fetchone()[0]
+        cur.execute(
+            f"""SELECT aanestys_id, vp_ar, istunto_nr, datum, otsikko_fi, otsikko_sv,
+                       ja_roster, nej_roster, tom_roster, franv_roster, resultat, kalla
+                FROM {t}voteringar {where}
+                ORDER BY datum, vp_ar, istunto_nr, length(aanestys_id), aanestys_id
+                LIMIT {p} OFFSET {p}""",
+            params + [max_treff, start_index],
+        )
+        rader = cur.fetchall()
+        cur.execute(f"SELECT min(datum), max(datum), count(*) FROM {t}voteringar")
+        fran, till, antal = cur.fetchone()
+
+    nycklar = ("aanestys_id", "vp_ar", "istunto_nr", "datum", "otsikko_fi", "otsikko_sv",
+               "ja_roster", "nej_roster", "tom_roster", "franv_roster", "resultat", "kalla")
+    voteringar = []
+    for r in rader:
+        rad = dict(zip(nycklar, tuple(r)))
+        rad["datum"] = str(rad["datum"]) if rad["datum"] else None
+        voteringar.append(rad)
+    return {
+        "totalt": totalt,
+        "voteringar": voteringar,
+        "tackning": {
+            "fran": str(fran) if fran else None,
+            "till": str(till) if till else None,
+            "antal": antal,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Synkstatus
 # ---------------------------------------------------------------------------

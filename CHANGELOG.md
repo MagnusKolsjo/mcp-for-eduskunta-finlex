@@ -44,6 +44,11 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Tillagt
 
+- **Verktyget `fi_sok_voteringar_lokalt`** läser de lokalt lagrade voteringarna
+  (tabellen `voteringar`, 1996–2014 ur `avoindata.eduskunta.fi`), bland dem de före
+  2008-10-17 som saknas i Eduskuntas nya API. Filter på rubrik (finska och svenska),
+  datumintervall, riksmöte, plenum och votering, med paginering. Svaret anger att det
+  är lokal data, synkdatum och täckning.
 - **Smal lokal cache för Finlex.** Chunks sparar nu sin position i texten
   (`tecken_start_fi/_sv`, `tecken_slut_fi/_sv`; nya kolumner läggs till vid uppstart).
   `03_chunka_och_embedda.py --bygg-index` skapar också fulltextindex på chunks, och när

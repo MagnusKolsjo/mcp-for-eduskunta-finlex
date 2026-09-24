@@ -221,6 +221,37 @@ class SokIDokumentSvar(TypedDict):
     traffar: list[ChunkTraff]
 
 
+class LokalVotering(TypedDict):
+    aanestys_id: str
+    vp_ar: int | None
+    istunto_nr: int | None
+    datum: str | None
+    otsikko_fi: str | None
+    otsikko_sv: str | None
+    ja_roster: int | None
+    nej_roster: int | None
+    tom_roster: int | None
+    franv_roster: int | None
+    resultat: str | None
+    kalla: str | None
+
+
+class LokalTackning(TypedDict):
+    fran: str | None
+    till: str | None
+    antal: int
+
+
+class LokalaVoteringarSvar(TypedDict):
+    kalla: str
+    synkad: str | None
+    tackning: LokalTackning
+    totalt: int
+    start_index: int
+    nasta_start_index: int | None
+    voteringar: list[LokalVotering]
+
+
 class VaalikaudetSvar(TypedDict):
     vaalikaudet: Any
     valtiopaivat: NotRequired[Any]
@@ -1451,6 +1482,66 @@ def fi_sok_i_dokument(
             fel += " Läs dokumentet med fi_hamta_dokument i stället."
         raise ToolError(fel)
     return svar
+
+
+@mcp.tool(title="Sök i lokalt lagrade voteringar", annotations=LASNING_DB)
+def fi_sok_voteringar_lokalt(
+    fraga: Optional[str] = None,
+    fran_datum: Optional[str] = None,
+    till_datum: Optional[str] = None,
+    vp_ar: Optional[int] = None,
+    istunto_nr: Optional[int] = None,
+    aanestys_id: Optional[str] = None,
+    max_treff: int = 20,
+    start_index: int = 0,
+) -> LokalaVoteringarSvar:
+    """
+    Söker bland voteringar som lagrats lokalt ur Eduskuntas gamla datatjänst.
+
+    Detta är LOKAL DATA, inte ett live-anrop: voteringarna 1996–2014 har synkats
+    med 02_synka_voteringar_historik.py ur avoindata.eduskunta.fi. Svaret anger
+    synkdatum (synkad) och täckning (tackning: första och sista datum, antal).
+    Här finns också voteringarna före 2008-10-17, som saknas i Eduskuntas nya API;
+    för senare voteringar, använd fi_hamta_aanestys (live).
+
+    Parametrar (alla valfria, kombineras med AND):
+      fraga       — ord i rubriken, finska eller svenska; komma ger OR
+                    (otsikko_fi = ärendets rubrik – voteringens rubrik,
+                     otsikko_sv = ärendets rubrik; voteringsrubriken finns bara på finska)
+      fran_datum  — YYYY-MM-DD, från och med
+      till_datum  — YYYY-MM-DD, till och med
+      vp_ar       — riksmöte (valtiopäivävuosi), t.ex. 1999
+      istunto_nr  — plenum inom riksmötet
+      aanestys_id — en viss votering, "{vp_ar}-{istunto_nr}-{nr}", t.ex. "1999-45-2"
+      max_treff   — antal per sida (standard 20, högst 200)
+      start_index — paginering (0-baserat)
+
+    Voteringarna sorteras i tidsordning. Enskilda ledamöters röster finns inte lokalt.
+    """
+    max_treff = max(1, min(max_treff, 200))
+    with _dbfel():
+        svar = db.sok_voteringar(
+            fraga=fraga, fran_datum=fran_datum, till_datum=till_datum,
+            vp_ar=vp_ar, istunto_nr=istunto_nr, aanestys_id=aanestys_id,
+            max_treff=max_treff, start_index=start_index,
+        )
+        status = db.hamta_sync_status("voteringar_historik") or {}
+    if svar["tackning"]["antal"] == 0:
+        raise ToolError(
+            "Inga voteringar finns lagrade lokalt. Kör 02_synka_voteringar_historik.py "
+            "för att hämta 1996–2014, eller använd fi_hamta_aanestys för voteringar "
+            "fr.o.m. 2008-10-17 live."
+        )
+    antal = len(svar["voteringar"])
+    return {
+        "kalla": "lokal databas, synkad ur avoindata.eduskunta.fi (SaliDBAanestys)",
+        "synkad": str(status["sist_synkad"]) if status.get("sist_synkad") else None,
+        "tackning": svar["tackning"],
+        "totalt": svar["totalt"],
+        "start_index": start_index,
+        "nasta_start_index": start_index + antal if start_index + antal < svar["totalt"] else None,
+        "voteringar": svar["voteringar"],
+    }
 
 
 @mcp.tool(title="Lista valperioder och riksmöten", annotations=LASNING_EXTERN)
