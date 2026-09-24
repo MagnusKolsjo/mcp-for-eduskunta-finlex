@@ -8,6 +8,18 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- **`fi_hamta_dokument` hämtar alltid live och lagrar inget lokalt.** Riksdagsdokument
+  sparades tidigare med hela råtexten vid varje hämtning. Svaret har inte längre
+  formen `{"kalla": "cache", "dokument": …}`.
+- **`fi_sok_i_dokument` indexerar riksdagsdokument live.** Saknas dokumentet lokalt på
+  frågans språk hämtas det, delas i stycken och embeddas vid första sökningen; bara
+  metadata, chunks och embeddings sparas. Träffarna bär `tecken_start`/`tecken_slut` i
+  texten från `fi_hamta_dokument`. Taket `FI_MAX_CHUNKS_LIVE` (standard 1 500 stycken)
+  begränsar hur stora dokument som indexeras i ett anrop. Annotationen är nu läsning mot
+  källa (öppen värld).
+- `fi_hamta_lag` sparar bara metadata; lagtexten hämtas live från Finlex.
+- POST-anrop mot Eduskunta (sökning) stryps trådsäkert under källans tak, 450 per
+  3000 s och IP (`EDUSKUNTA_POST_PER_3000S`, `EDUSKUNTA_POST_SKUR`).
 - **Finlex-synken är inkrementell via `publishedSince`.** `01_synka_finlex.py` hämtar
   utan flaggor alla dokument som publicerats eller ändrats sedan senaste lyckade
   körning (med en dags marginal), oavsett dokumentets år. Tidigare synkades bara de två

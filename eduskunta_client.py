@@ -44,6 +44,17 @@ API_BASE   = os.getenv("EDUSKUNTA_API_BASE", "https://api.eduskunta.fi/api/v1")
 RATE_LIMIT = int(os.getenv("EDUSKUNTA_RATE_LIMIT", "60"))   # anrop/minut
 USER_AGENT = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
 
+# POST-anrop (sökning, aggregering) har ett eget tak hos Eduskunta: 450 per
+# 3000 sekunder och IP-adress. Hinken fylls i den takten och rymmer högst
+# EDUSKUNTA_POST_SKUR anrop i en följd, så att en skur inte tömmer hela
+# kvoten för de kommande 50 minuterna.
+POST_TAK       = int(os.getenv("EDUSKUNTA_POST_PER_3000S", "450"))
+POST_SKUR      = int(os.getenv("EDUSKUNTA_POST_SKUR", "30"))
+_post_takt     = POST_TAK / 3000.0          # anrop per sekund
+_post_tokens   = float(POST_SKUR)
+_post_last_ts  = time.monotonic()
+_post_lock     = threading.Lock()
+
 # Token-bucket för rate-limiting
 _bucket_tokens  = float(RATE_LIMIT)
 _bucket_last_ts = time.monotonic()
@@ -74,6 +85,23 @@ def _throttle():
             _bucket_tokens -= 1.0
 
 
+def _throttle_post():
+    """Håller POST-anropen under Eduskuntas tak; väntar vid behov (trådsäkert)."""
+    global _post_tokens, _post_last_ts
+    with _post_lock:
+        now = time.monotonic()
+        _post_tokens  = min(POST_SKUR, _post_tokens + (now - _post_last_ts) * _post_takt)
+        _post_last_ts = now
+        if _post_tokens < 1:
+            vanta = (1 - _post_tokens) / _post_takt
+            log.info("Eduskuntas POST-tak nått, väntar %.1f s", vanta)
+            time.sleep(vanta)
+            _post_tokens  = 0.0
+            _post_last_ts = time.monotonic()
+        else:
+            _post_tokens -= 1.0
+
+
 def _headers() -> dict:
     return {
         "User-Agent": USER_AGENT,
@@ -93,6 +121,7 @@ def _get(path: str, params: Optional[dict] = None) -> dict:
 def _post(path: str, data: dict) -> dict:
     """POST mot API_BASE/{path} med JSON-body — returnerar JSON som dict."""
     _throttle()
+    _throttle_post()
     url = f"{API_BASE}/{path}"
     r = httpx.post(
         url,

@@ -201,6 +201,8 @@ class ChunkTraff(TypedDict):
     chunk_index: int
     text: str | None
     likhet: float
+    tecken_start: NotRequired[int | None]
+    tecken_slut: NotRequired[int | None]
 
 
 class SokIDokumentSvar(TypedDict):
@@ -764,8 +766,8 @@ def fi_hamta_dokument(
     Hämtar metadata och fulltext för ett riksdagsdokument från api.eduskunta.fi.
 
     Hämtar HTML-fulltext om htmlSaatavilla=true, annars raw XML via redirect.
-    Hämtar alltid både finsk och svensk version när båda finns.
-    Resultatet cachas lokalt i databasen (TTL 24h).
+    Hämtar alltid både finsk och svensk version när båda finns. Dokumentet
+    hämtas live varje gång; det lagras inte lokalt.
 
     Svaret innehåller alltid:
       fulltext_fi — finsk fulltext (för sökning och analys)
@@ -789,20 +791,6 @@ def fi_hamta_dokument(
     """
     if not edk_id and not eduskuntatunnus:
         raise ToolError("Ange edk_id eller eduskuntatunnus.")
-
-    # Kontrollera cache — returnera om båda fulltexterna finns (eller om fulltext inte önskas)
-    if edk_id:
-        cachad = _las_cache(db.hamta_dokument_via_edk_id, edk_id)
-    else:
-        cachad = _las_cache(db.hamta_dokument_via_eduskuntatunnus, eduskuntatunnus)
-    if cachad and (not hamta_fulltext or
-                   (cachad.get("fulltext_fi") and cachad.get("fulltext_sv"))):
-        if not hamta_fulltext:
-            cachad = {k: v for k, v in cachad.items()
-                      if k not in ("fulltext_fi", "fulltext_sv", "fulltext_html", "fulltext_md")}
-        else:
-            cachad = _begransa_tvasprakig(dict(cachad), max_tecken, fran_tecken)
-        return {"kalla": "cache", "dokument": cachad}
 
     # Hämta finskt primärdokument
     with _kallfel("Eduskuntas API"):
@@ -875,21 +863,6 @@ def fi_hamta_dokument(
         except Exception as exc:
             log.warning("Kunde inte hämta sv syskondokument för %s: %s", ed_tunnus_str, exc)
 
-    _cacha(
-        kalla="eduskunta",
-        edk_id=edk_id,
-        eduskuntatunnus_fi=ed_tunnus_str,
-        typ=meta.get("asiakirjatyyppikoodi"),
-        titel_fi=meta.get("nimeketeksti") if meta.get("kielikoodi") == "fi" else None,
-        titel_sv=sv_meta.get("nimeketeksti") if sv_meta else None,
-        ar=int(meta["valtiopaivavuosi"]) if meta.get("valtiopaivavuosi") else None,
-        datum=meta.get("laadintapvm"),
-        html_saatavilla=html_saatavilla,
-        fulltext_fi=fulltext_fi,
-        fulltext_sv=fulltext_sv,
-    )
-
-    # Databasen har alltid hela texten — trunkeringen gäller bara svaret.
     return {
         "kalla":           "eduskunta",
         "edk_id":          edk_id,
@@ -1201,6 +1174,8 @@ def fi_hamta_lag(
         akn_uri_fi = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_FI)
         akn_uri_sv = fx.byt_sprak_i_uri(faktisk, fx.SPRAK_SV)
 
+    # Bara metadata sparas. Lagtexten hämtas live nästa gång också; lokalt
+    # behövs bara chunks och embeddings för sökningen.
     _cacha(
         kalla="finlex",
         akn_uri_fi=akn_uri_fi,
@@ -1213,8 +1188,6 @@ def fi_hamta_lag(
         titel_sv=meta.get("titel_sv"),
         ar=meta.get("ar") or ar,
         nummer=meta.get("nummer") or nummer,
-        fulltext_fi=fulltext_fi,
-        fulltext_sv=fulltext_sv,
     )
 
     return {
@@ -1222,7 +1195,6 @@ def fi_hamta_lag(
         "metadata":   meta,
         "akn_uri_fi": akn_uri_fi,
         "akn_uri_sv": akn_uri_sv,
-        # Databasen har alltid hela texten — trunkeringen gäller bara svaret.
         **_begransa_tvasprakig(
             {"fulltext_fi": fulltext_fi, "fulltext_sv": fulltext_sv},
             max_tecken, fran_tecken,
@@ -1324,7 +1296,91 @@ def fi_hamta_aanestys(
     raise ToolError("Ange aanestystunnus, eduskuntatunnus, istuntotunnus eller senaste=True.")
 
 
-@mcp.tool(title="Sök semantiskt i ett dokument", annotations=LASNING_DB)
+# Tak för live-indexering. Ett dokument på 1,2 miljoner tecken ger ungefär
+# 1 500 stycken; fler än så tar för lång tid att embedda i ett verktygsanrop.
+FI_MAX_CHUNKS_LIVE = int(os.getenv("FI_MAX_CHUNKS_LIVE", "1500"))
+
+
+def _indexera_eduskunta(edk_id: str | None, eduskuntatunnus: str | None, sprak: str) -> int:
+    """
+    Hämtar ett riksdagsdokument live, chunkar och embeddar det på ett språk.
+
+    Sparar dokumentets metadata och chunks (text, embedding, offsets), inte
+    råtexten. Returnerar dokumentets id i databasen.
+    """
+    from chunkning import chunka_text
+
+    with _kallfel("Eduskuntas API", ej_hittad="Dokumentet hittades inte i Eduskuntas API."):
+        if edk_id:
+            try:
+                meta = ed.hamta_asiakirja_metadata(edk_id)
+            except ValueError as exc:
+                raise ToolError(f"Inget dokument hittades för edk_id {edk_id}.") from exc
+        else:
+            treffar = ed.hamta_asiakirja_via_eduskuntatunnus(eduskuntatunnus).get("results", [])
+            if not treffar:
+                raise ToolError(
+                    f"Inget dokument hittades för beteckning {eduskuntatunnus}. "
+                    "Kontrollera formatet, t.ex. 'HE 15/2026 vp' eller 'RP 15/2026 rd'."
+                )
+            docs = [r.get("asiakirja") or r for r in treffar]
+            meta = next((d for d in docs if d.get("kielikoodi") == "fi"), docs[0])
+        edk_fi = meta.get("edktunnus")
+        tunnus = meta.get("eduskuntatunnus")
+        tunnus = (tunnus.get("fi") or tunnus.get("sv")) if isinstance(tunnus, dict) else tunnus
+
+        if sprak == "fi":
+            text = ed.html_till_text(ed.hamta_html_fulltext(edk_fi) or "") if meta.get("htmlSaatavilla") else ""
+            titel = meta.get("nimeketeksti")
+        else:
+            sv = ed.hamta_syskondokument_sv(tunnus) if tunnus else None
+            text = ""
+            titel = sv.get("nimeketeksti") if sv else None
+            if sv and sv.get("htmlSaatavilla") and sv.get("edktunnus"):
+                text = ed.html_till_text(ed.hamta_html_fulltext(sv["edktunnus"]) or "")
+
+    if not text:
+        spraknamn = "finska" if sprak == "fi" else "svenska"
+        raise ToolError(
+            f"Dokumentet saknar text på {spraknamn} i HTML-form hos Eduskunta och kan "
+            "inte sökas semantiskt. Ställ frågan på det andra språket, eller läs "
+            "dokumentet med fi_hamta_dokument."
+        )
+    chunks = chunka_text(text)
+    if not chunks:
+        raise ToolError("Dokumentets text är för kort för semantisk sökning; läs det med fi_hamta_dokument.")
+    if len(chunks) > FI_MAX_CHUNKS_LIVE:
+        raise ToolError(
+            f"Dokumentet ger {len(chunks)} stycken, fler än taket {FI_MAX_CHUNKS_LIVE} för "
+            "indexering i ett anrop. Läs det med fi_hamta_dokument och fran_tecken, "
+            "eller höj FI_MAX_CHUNKS_LIVE."
+        )
+
+    modell = _hamta_modell_sv() if sprak == "sv" else _hamta_modell_fi()
+    texter = [f"{titel}\n\n{c['text']}" if titel else c["text"] for c in chunks]
+    embeddings = modell.encode(texter, batch_size=32, normalize_embeddings=True,
+                               show_progress_bar=False)
+
+    with _dbfel():
+        dok_id = db.upsert_dokument(
+            kalla="eduskunta",
+            edk_id=edk_fi,
+            eduskuntatunnus_fi=tunnus,
+            typ=meta.get("asiakirjatyyppikoodi"),
+            titel_fi=meta.get("nimeketeksti") if meta.get("kielikoodi") == "fi" else None,
+            titel_sv=titel if sprak == "sv" else None,
+            ar=int(meta["valtiopaivavuosi"]) if meta.get("valtiopaivavuosi") else None,
+            datum=meta.get("laadintapvm"),
+            html_saatavilla=bool(meta.get("htmlSaatavilla")),
+        )
+        if not dok_id or dok_id < 0:
+            dok_id = db.hamta_dokument_via_edk_id(edk_fi)["id"]
+        db.spara_chunks(dok_id, chunks, embeddings, sprak)
+    log.info("Indexerade %s (%s): %d stycken", edk_fi, sprak, len(chunks))
+    return dok_id
+
+
+@mcp.tool(title="Sök semantiskt i ett dokument", annotations=LASNING_EXTERN)
 def fi_sok_i_dokument(
     fraga: str,
     edk_id: Optional[str] = None,
@@ -1332,11 +1388,13 @@ def fi_sok_i_dokument(
     max_treff: int = 5,
 ) -> SokIDokumentSvar:
     """
-    Semantisk sökning via pgvector inom ett enskilt cachat dokument.
+    Semantisk sökning via pgvector inom ett enskilt riksdagsdokument.
 
-    Används för att hitta specifika stycken i ett riksdagsdokument eller en
-    lag utan att läsa hela fulltexten. Kräver PostgreSQL med pgvector samt
-    att dokumentet är chunkat och indexerat (03_chunka_och_embedda.py).
+    Används för att hitta specifika stycken utan att läsa hela fulltexten.
+    Kräver PostgreSQL med pgvector. Är dokumentet inte indexerat på frågans
+    språk hämtas det live, delas i stycken och embeddas vid första sökningen
+    (tar från några sekunder upp till någon minut för mycket långa dokument);
+    därefter finns styckena lokalt. Dokumentets råtext sparas inte.
 
     Parametrar:
       fraga           — vad du söker efter, på finska eller svenska
@@ -1349,7 +1407,8 @@ def fi_sok_i_dokument(
     Minst ett av edk_id eller eduskuntatunnus måste anges.
 
     Returnerar dokumentmetadata + lista med matchande chunk-träffar sorterade
-    efter semantisk likhet, med chunk_index, text och likhetspoäng.
+    efter semantisk likhet, med chunk_index, text, likhetspoäng och styckets
+    position (tecken_start/tecken_slut) i texten från fi_hamta_dokument.
 
     Typiskt arbetsflöde:
       1. fi_sok_eduskunta(fraga=...) → identifiera dokument, notera edk_id
@@ -1362,25 +1421,17 @@ def fi_sok_i_dokument(
     if not db.ar_postgres():
         raise ToolError("Semantisk sökning kräver PostgreSQL med pgvector; SQLite-läget stöds inte.")
 
-    # Slå upp dokumentets interna id
+    sprak = _detektera_sprak(fraga)
+
+    # Slå upp dokumentet; indexera det live om det saknas på frågans språk.
     with _dbfel():
         if edk_id:
             cachad = db.hamta_dokument_via_edk_id(edk_id)
         else:
             cachad = db.hamta_dokument_via_eduskuntatunnus(eduskuntatunnus)
+        klart = bool(cachad) and db.antal_chunks_med_embedding(cachad["id"], sprak) > 0
+    dokument_id = cachad["id"] if klart else _indexera_eduskunta(edk_id, eduskuntatunnus, sprak)
 
-    if not cachad:
-        identifierare = edk_id or eduskuntatunnus
-        raise ToolError(
-            f"Dokumentet '{identifierare}' finns inte i lokal cache. "
-            "Hämta det först med fi_hamta_dokument och kör chunkning och "
-            "embedding (03_chunka_och_embedda.py) så att det indexeras."
-        )
-
-    dokument_id = cachad["id"]
-
-    # Detektera frågespråk och generera embedding med rätt modell
-    sprak = _detektera_sprak(fraga)
     try:
         embedding = _embedda(fraga, sprak)
     except Exception as exc:
@@ -1397,10 +1448,7 @@ def fi_sok_i_dokument(
     if "fel" in svar:
         fel = svar["fel"]
         if svar.get("antal_chunks") == 0:
-            fel += (
-                " Kör 03_chunka_och_embedda.py för att indexera dokumentet, "
-                "eller läs det med fi_hamta_dokument så länge."
-            )
+            fel += " Läs dokumentet med fi_hamta_dokument i stället."
         raise ToolError(fel)
     return svar
 
