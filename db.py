@@ -209,7 +209,11 @@ VEKTOR_DIM = 768
 HNSW_M = 16
 HNSW_EF_CONSTRUCTION = 64
 HNSW_EF_SEARCH = int(os.getenv("FI_HNSW_EF_SEARCH", "100"))
-IVFFLAT_PROBES = int(os.getenv("FI_IVFFLAT_PROBES", "20"))
+# Gäller bara IVFFlat-index, dvs. en databas som ännu inte konverterats.
+# Varje probe läser ungefär 1/lists av alla vektorer ur TOAST: med 3 miljoner
+# chunks och lists=100 tar probes=20 över en minut per fråga. Standard 1 är
+# pgvectors eget standardvärde; träffsäkerheten höjs genom konverteringen.
+IVFFLAT_PROBES = int(os.getenv("FI_IVFFLAT_PROBES", "1"))
 
 # Under den här storleken konverteras kolumnerna automatiskt vid uppstart
 # (ny eller nästan tom databas). Större tabeller konverteras med

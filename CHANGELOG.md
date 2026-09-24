@@ -15,11 +15,11 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   0,88 för IVFFlat (probes 20) på 60 000 riktiga vektorer. Nya och nästan tomma
   databaser konverteras vid uppstart; större konverteras med `06_konvertera_vektorer.py`.
   Servern läser kolumntypen vid varje sökning och fungerar före och efter.
-- Vektorsökningen sätter `hnsw.ef_search` (`FI_HNSW_EF_SEARCH`, standard 100),
-  `ivfflat.probes` (`FI_IVFFLAT_PROBES`, standard 20) och iterativ indexsökning för
-  filtrerade frågor. Tidigare användes pgvectors standard `probes = 1`, som i en
-  provmätning gav recall@10 0,64. Sökning inom ett dokument sorterar exakt i stället
-  för att gå via indexet.
+- Vektorsökningen sätter `hnsw.ef_search` (`FI_HNSW_EF_SEARCH`, standard 100) och
+  iterativ indexsökning för filtrerade frågor. En databas som ännu har IVFFlat-index
+  använder som förut `probes = 1` (`FI_IVFFLAT_PROBES`); i en provmätning gav det
+  recall@10 0,64, och högre värden blir mycket långsamma på miljontals chunks. Sökning
+  inom ett dokument sorterar exakt i stället för att gå via indexet.
 - `03_chunka_och_embedda.py --bygg-index` bygger HNSW-index; `--lists` är borttagen och
   `--minne` sätter `maintenance_work_mem` för bygget.
 - **`fi_hamta_dokument` hämtar alltid live och lagrar inget lokalt.** Riksdagsdokument
