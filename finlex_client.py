@@ -40,7 +40,11 @@ load_dotenv(Path(__file__).parent / ".env")
 log = logging.getLogger(__name__)
 
 API_BASE   = os.getenv("FINLEX_API_BASE", "https://opendata.finlex.fi/finlex/avoindata/v1")
-RATE_LIMIT = int(os.getenv("FINLEX_RATE_LIMIT", "20"))   # anrop/minut (konservativt)
+# Anrop per minut, för list- och dokumentanrop tillsammans. Finlex anger
+# ingen gräns; 40/min är en försiktig nivå (28 000 anrop i 20/min gav inget
+# 429). Vid 429 väntar klienten och försöker igen. Parallella listanrop ger
+# ingen vinst så länge den gemensamma takten styr.
+RATE_LIMIT = int(os.getenv("FINLEX_RATE_LIMIT", "40"))
 USER_AGENT = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
 
 # Token-bucket för rate-limiting

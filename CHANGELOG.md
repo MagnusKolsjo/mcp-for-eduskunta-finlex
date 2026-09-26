@@ -56,6 +56,8 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   listanrop. Äldre lydelser hämtas live vid behov. Den inkrementella synken följer
   samma första år som den fullständiga (`--fran-ar` ändrar det), och `--i-kraft`
   begränsar till gällande författningar.
+- Standardtakten mot Finlex är 40 anrop per minut (`FINLEX_RATE_LIMIT`, tidigare 20).
+  Finlex anger ingen gräns och 429 hanteras med väntan.
 - En redan lagrad text skrivs inte över med en väsentligt kortare (under hälften) för
   samma version; avvikelsen loggas.
 - **Brytande: kräver `mcp>=2.0,<3`.** Servern bygger på `MCPServer`; `mcp.server.fastmcp`

@@ -109,8 +109,13 @@ Ordningen spelar roll; stegen 3–5 ändrar databasen och kan ta tid.
    fullständiga synken, så att ändringar i äldre lagar sedan dess kommer med:
 
    ```
-   python3 01_synka_finlex.py --sedan 2026-05-01
+   python3 01_synka_finlex.py --sedan 2026-05-01T00:00:00Z
    ```
+
+   Finlex publicerade om hela samlingen i maj 2026. Synken hämtar ändå bara
+   lydelser som är nya eller saknas lokalt och följer samma första år som den
+   fullständiga synken. Avbryts körningen fortsätter nästa körning (samma
+   kommando eller utan `--sedan`) på sidan där den slutade.
 
    Senare körningar (även den dagliga) behöver ingen flagga; de fortsätter från
    förra lyckade körningen.
