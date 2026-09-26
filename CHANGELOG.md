@@ -83,6 +83,10 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Fixat
 
+- **Finlex-synken loggade nätverksfel som 404** och behandlade dokumentet som saknat.
+  DNS-fel, timeout och 5xx räknas nu som fel: de loggas som att Finlex inte svarade, och
+  checkpointen (tidpunkt eller år) flyttas inte förbi dem, så att nästa körning prövar
+  igen. Bara ett faktiskt 404 räknas som saknat dokument.
 - **`03_chunka_och_embedda.py` embeddade aldrig nya dokument.** Urvalet krävde en
   befintlig chunk-rad utan embedding, så dokument utan några chunks alls valdes aldrig
   (utan `--tvinga`). Den dagliga synken lade alltså till dokument som aldrig blev

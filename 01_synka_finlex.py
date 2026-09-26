@@ -120,17 +120,18 @@ def synka_typ(
             continue
 
         # Hämta och lagra parallellt
+        utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
         with ThreadPoolExecutor(max_workers=max_trad) as pool:
-            fragor = {
-                pool.submit(_behandla_poster, poster): poster
-                for poster in _chunk(poster, max_trad)
-            }
-            for framtid in as_completed(fragor):
-                try:
-                    n = framtid.result()
-                    totalt += n
-                except Exception as exc:
-                    log.error("Batch misslyckades: %s", exc)
+            for framtid in as_completed(
+                [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
+            ):
+                _sla_ihop(utfall, framtid.result())
+        totalt += utfall[OK]
+        if utfall[FEL]:
+            # Året markeras inte som klart; nästa körning börjar om från det.
+            log.error("%s/%s år %d: %d dokument kunde inte hämtas (Finlex svarade inte); "
+                      "året markeras inte som klart", hierarki, typ, ar, len(utfall[FEL]))
+            return totalt
 
         db.set_sync_status(
             kalla=kalla_nyckel,
@@ -148,60 +149,82 @@ def _chunk(lista: list, storlek: int) -> list:
         yield lista[i:i + storlek]
 
 
-def _behandla_poster(poster: list) -> int:
-    """Hämtar och lagrar en batch med poster. Körs i trådpool."""
-    n = 0
-    for post in poster:
-        akn_uri = post.get("akn_uri", "")
-        status  = post.get("status", "")
+# Utfall per hämtad URI. FEL betyder att Finlex inte svarade (nätverk, timeout,
+# 5xx): dokumentet kan finnas och ska prövas igen, och checkpointen får inte
+# flyttas förbi det. SAKNAS är ett faktiskt 404.
+OK, SAKNAS, FEL = "ok", "saknas", "fel"
 
+
+def _behandla_uri(akn_uri: str) -> str:
+    """Hämtar och lagrar ett dokument. Returnerar OK, SAKNAS eller FEL."""
+    sprak    = fx.sprak_av_uri(akn_uri)
+    hierarki = _hierarki_av_uri(akn_uri)
+    typ      = _typ_av_uri(akn_uri)
+    try:
+        rot = fx.hamta_akn_dokument(akn_uri, strikt=True)
+    except fx.FinlexOtillganglig as exc:
+        log.warning("Finlex svarade inte för %s (%s); prövas igen senare", akn_uri, exc)
+        return FEL
+    if rot is None:
+        log.info("404 för %s", akn_uri)
+        return SAKNAS
+
+    try:
+        meta     = fx.parsad_akn_metadata(rot)
+        fulltext = fx.extrahera_fulltext(rot)
+
+        # Bygg URI för det andra språket (för lagring)
+        if sprak == "fi":
+            akn_uri_fi = akn_uri
+            akn_uri_sv = fx.byt_sprak_i_uri(akn_uri, fx.SPRAK_SV)
+        else:
+            akn_uri_sv = akn_uri
+            akn_uri_fi = fx.byt_sprak_i_uri(akn_uri, fx.SPRAK_FI)
+
+        db.upsert_dokument(
+            kalla="finlex",
+            akn_uri_fi=akn_uri_fi,
+            akn_uri_sv=akn_uri_sv,
+            eli=meta.get("eli"),
+            typ=typ,
+            finlex_hierarki=hierarki,
+            finlex_typ=typ,
+            titel_fi=meta.get("titel_fi"),
+            titel_sv=meta.get("titel_sv"),
+            ar=meta.get("ar"),
+            nummer=meta.get("nummer"),
+            sprak=sprak,
+            fulltext_fi=fulltext if sprak == "fi" else None,
+            fulltext_sv=fulltext if sprak == "sv" else None,
+        )
+    except Exception as exc:
+        log.error("Kunde inte lagra %s: %s", akn_uri, exc)
+        return FEL
+    return OK
+
+
+def _behandla_poster(poster: list) -> dict:
+    """Hämtar och lagrar en batch med listposter. Körs i trådpool.
+
+    Returnerar {OK: antal, SAKNAS: antal, FEL: [uri, ...]}.
+    """
+    utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
+    for post in poster:
+        akn_uri = post.get("akn_uri", "") if isinstance(post, dict) else post
         if not akn_uri:
             continue
+        r = _behandla_uri(akn_uri)
+        if r == FEL:
+            utfall[FEL].append(akn_uri)
+        else:
+            utfall[r] += 1
+    return utfall
 
-        sprak    = fx.sprak_av_uri(akn_uri)
-        hierarki = _hierarki_av_uri(akn_uri)
-        typ      = _typ_av_uri(akn_uri)
 
-        try:
-            rot = fx.hamta_akn_dokument(akn_uri)
-            if rot is None:
-                log.warning("404 för %s", akn_uri)
-                continue
-
-            meta     = fx.parsad_akn_metadata(rot)
-            fulltext = fx.extrahera_fulltext(rot)
-
-            # Bygg URI för det andra språket (för lagring)
-            if sprak == "fi":
-                akn_uri_fi = akn_uri
-                akn_uri_sv = fx.byt_sprak_i_uri(akn_uri, fx.SPRAK_SV)
-            else:
-                akn_uri_sv = akn_uri
-                akn_uri_fi = fx.byt_sprak_i_uri(akn_uri, fx.SPRAK_FI)
-
-            db.upsert_dokument(
-                kalla="finlex",
-                akn_uri_fi=akn_uri_fi,
-                akn_uri_sv=akn_uri_sv,
-                eli=meta.get("eli"),
-                typ=typ,
-                finlex_hierarki=hierarki,
-                finlex_typ=typ,
-                titel_fi=meta.get("titel_fi"),
-                titel_sv=meta.get("titel_sv"),
-                ar=meta.get("ar"),
-                nummer=meta.get("nummer"),
-                sprak=sprak,
-                fulltext_fi=fulltext if sprak == "fi" else None,
-                fulltext_sv=fulltext if sprak == "sv" else None,
-            )
-            n += 1
-            log.debug("Sparad: %s (status=%s)", akn_uri, status)
-
-        except Exception as exc:
-            log.error("Misslyckades för %s: %s", akn_uri, exc)
-
-    return n
+def _sla_ihop(summa: dict, del_: dict) -> None:
+    summa[OK] += del_[OK]
+    summa[SAKNAS] += del_[SAKNAS]
+    summa[FEL].extend(del_[FEL])
 
 
 def _hierarki_av_uri(uri: str) -> str:
@@ -287,20 +310,17 @@ def synka_sedan(
                                detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
         return len(poster)
 
-    totalt = 0
-    misslyckade = 0
+    utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
     with ThreadPoolExecutor(max_workers=max_trad) as pool:
-        fragor = [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
-        for framtid in as_completed(fragor):
-            try:
-                totalt += framtid.result()
-            except Exception as exc:
-                misslyckade += 1
-                log.error("Batch misslyckades: %s", exc)
+        for framtid in as_completed(
+            [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
+        ):
+            _sla_ihop(utfall, framtid.result())
+    totalt = utfall[OK]
 
-    if misslyckade:
-        log.warning("%s/%s: %d batcher misslyckades; tidpunkten flyttas inte fram",
-                    hierarki, typ, misslyckade)
+    if utfall[FEL]:
+        log.error("%s/%s: %d dokument kunde inte hämtas (Finlex svarade inte); "
+                  "tidpunkten flyttas inte fram", hierarki, typ, len(utfall[FEL]))
     else:
         db.set_sync_status(kalla=kalla_nyckel, antal_poster=totalt,
                            detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
