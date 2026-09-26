@@ -45,7 +45,7 @@ API_BASE   = os.getenv("FINLEX_API_BASE", "https://opendata.finlex.fi/finlex/avo
 # 429). Vid 429 väntar klienten och försöker igen. Parallella listanrop ger
 # ingen vinst så länge den gemensamma takten styr.
 RATE_LIMIT = int(os.getenv("FINLEX_RATE_LIMIT", "40"))
-USER_AGENT = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
+USER_AGENT = "mcp-for-eduskunta-finlex/2.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
 
 # Token-bucket för rate-limiting
 _bucket_tokens  = float(RATE_LIMIT)

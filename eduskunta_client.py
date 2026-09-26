@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 API_BASE   = os.getenv("EDUSKUNTA_API_BASE", "https://api.eduskunta.fi/api/v1")
 RATE_LIMIT = int(os.getenv("EDUSKUNTA_RATE_LIMIT", "60"))   # anrop/minut
-USER_AGENT = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
+USER_AGENT = "mcp-for-eduskunta-finlex/2.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
 
 # POST-anrop (sökning, aggregering) har ett eget tak hos Eduskunta: 450 per
 # 3000 sekunder och IP-adress. Hinken fylls i den takten och rymmer högst

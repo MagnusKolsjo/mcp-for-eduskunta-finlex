@@ -55,7 +55,7 @@ log = logging.getLogger("synka_voteringar_historik")
 import httpx
 
 AVOINDATA_BASE = "https://avoindata.eduskunta.fi/api/v1/tables"
-USER_AGENT     = "mcp-for-eduskunta-finlex/1.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
+USER_AGENT     = "mcp-for-eduskunta-finlex/2.0 (+https://github.com/MagnusKolsjo/mcp-for-eduskunta-finlex)"
 SIDSTORLEK     = 100
 
 
