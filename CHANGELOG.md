@@ -10,6 +10,7 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- Frågeexpansion på serversidan har inget förvalt modellnamn. `QUERY_EXPANSION_MODEL` anges alltid i `.env` (platshållare `<modellnamn>` i `config.example.env`).
 - User-Agent-strängen följer huvudversionen: `mcp-for-eduskunta-finlex/2.0`.
 - **Embeddings lagras som `halfvec(768)` med HNSW-index.** halfvec halverar
   vektorlagringen; på riktiga chunks gav exakt sökning samma topp-10 som `vector` i
