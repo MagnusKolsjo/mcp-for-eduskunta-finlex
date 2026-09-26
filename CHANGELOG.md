@@ -41,6 +41,13 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   senaste åren, så nya konsoliderade lydelser av äldre lagar kom aldrig med. Tidpunkten
   sparas per dokumenttyp i `sync_status`; `--sedan` anger den uttryckligen. `--alla` och
   `--ar` synkar årsvis som förut.
+- **Den inkrementella Finlex-synken går att återuppta.** Listan behandlas sida för sida
+  och framsteget sparas efter varje sida (`sync_status.detaljer.pagaende`). En avbruten
+  körning fortsätter på nästa sida, med samma tidpunkt, i stället för att lista om allt.
+  Dokument som Finlex inte svarade för sparas i `detaljer.misslyckade` och prövas igen.
+  `publicerad_sedan` flyttas fram först när listan är genomgången utan kvarstående fel,
+  till starttiden för körningens första försök. `--max-sidor` begränsar en körning.
+  Listanrop som möter nätverksfel prövas också igen.
 - **Brytande: kräver `mcp>=2.0,<3`.** Servern bygger på `MCPServer`; `mcp.server.fastmcp`
   finns inte i mcp 2.x.
 - **Brytande: http-läget kräver `MCP_API_KEY`.** Utan nyckel avbryts uppstarten med

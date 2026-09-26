@@ -107,8 +107,10 @@ def _get_json(url: str, params: Optional[dict] = None, max_forsok: int = 3) -> d
                 continue
             r.raise_for_status()
             return r.json()
-        except httpx.HTTPStatusError as exc:
+        except httpx.HTTPError as exc:
+            # Även nätverksfel (DNS, timeout) prövas igen innan felet lämnas vidare.
             if forsok < max_forsok - 1:
+                log.warning("Fel vid listhämtning (%s), försök %d/%d", exc, forsok + 1, max_forsok)
                 time.sleep(5 * (forsok + 1))
                 continue
             raise

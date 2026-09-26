@@ -32,6 +32,7 @@ Flaggor:
   --typ TYP    Synka bara en specifik typ (t.ex. --typ statute)
   --ar AR      Synka ett specifikt år
   --sedan TID  Inkrementell synk från en given tidpunkt (ISO 8601, t.ex. 2026-05-01)
+  --max-sidor N  Högst N listsidor per typ; en avbruten körning fortsätter nästa gång
   --trad N     Antal parallella trådar (default 2 — respektera rate limit)
   --torr       Torrkörning: hämta /list men ladda inte ned XML
 """
@@ -274,12 +275,18 @@ def _tolka_tid(varde) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def bestam_publicerad_sedan(typ: str) -> datetime | None:
-    """Tidpunkt att synka från: senaste lyckade körning, annars sist_synkad."""
-    status = db.hamta_sync_status(f"finlex_{typ.replace('-', '_')}") or {}
+def _las_detaljer(kalla_nyckel: str) -> tuple[dict, dict]:
+    """(status, detaljer) ur sync_status; detaljer som dict för båda backenderna."""
+    status = db.hamta_sync_status(kalla_nyckel) or {}
     detaljer = status.get("detaljer") or {}
     if isinstance(detaljer, str):  # SQLite lagrar JSON som text
         detaljer = json.loads(detaljer)
+    return status, dict(detaljer)
+
+
+def bestam_publicerad_sedan(typ: str) -> datetime | None:
+    """Tidpunkt att synka från: senaste lyckade körning, annars sist_synkad."""
+    status, detaljer = _las_detaljer(f"finlex_{typ.replace('-', '_')}")
     t = _tolka_tid(detaljer.get("publicerad_sedan")) or _tolka_tid(status.get("sist_synkad"))
     return t - MARGINAL if t else None
 
@@ -287,43 +294,112 @@ def bestam_publicerad_sedan(typ: str) -> datetime | None:
 def synka_sedan(
     hierarki: str,
     typ: str,
-    sedan: datetime,
+    sedan: datetime | None,
     torrkoring: bool = False,
     max_trad: int = 2,
-) -> int:
+    max_sidor: int = 0,
+) -> int | None:
     """
     Synkar alla dokument av en typ som publicerats eller ändrats sedan `sedan`.
 
-    Körningens starttid sparas först när alla poster är behandlade, så att en
-    avbruten körning upprepas från samma tidpunkt nästa gång.
+    Listan gås igenom sida för sida, och varje sida behandlas innan nästa
+    hämtas. Efter varje sida sparas framsteget i sync_status
+    (detaljer.pagaende), så att en avbruten körning fortsätter på nästa sida
+    i stället för att lista om allt. Dokument som Finlex inte svarade för
+    sparas i detaljer.misslyckade och prövas igen. publicerad_sedan flyttas
+    fram först när hela listan är behandlad och inga fel återstår; den nya
+    tidpunkten är starttiden för körningens första försök, så ändringar under
+    körningen kommer med nästa gång.
+
+    sedan=None: fortsätt en pågående körning, annars från senaste lyckade.
+    Returnerar antal lagrade dokument, eller None om ingen starttidpunkt finns.
     """
     kalla_nyckel = f"finlex_{typ.replace('-', '_')}"
-    korningens_start = datetime.now(timezone.utc)
-    poster = fx.hamta_alla_i_lista(
-        hierarki=hierarki, typ=typ, publicerad_sedan=_iso_utc(sedan),
-    )
-    log.info("%s/%s: %d poster publicerade eller ändrade sedan %s",
-             hierarki, typ, len(poster), _iso_utc(sedan))
-    if torrkoring or not poster:
-        if not torrkoring:
-            db.set_sync_status(kalla=kalla_nyckel,
-                               detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
-        return len(poster)
+    _, detaljer = _las_detaljer(kalla_nyckel)
+    pagaende = detaljer.get("pagaende")
 
-    utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
-    with ThreadPoolExecutor(max_workers=max_trad) as pool:
-        for framtid in as_completed(
-            [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
-        ):
-            _sla_ihop(utfall, framtid.result())
-    totalt = utfall[OK]
-
-    if utfall[FEL]:
-        log.error("%s/%s: %d dokument kunde inte hämtas (Finlex svarade inte); "
-                  "tidpunkten flyttas inte fram", hierarki, typ, len(utfall[FEL]))
+    if pagaende and (sedan is None or _iso_utc(sedan) == pagaende.get("sedan")):
+        sedan_iso = pagaende["sedan"]
+        start_iso = pagaende["start"]
+        sida      = int(pagaende.get("sida", 0)) + 1
+        log.info("%s/%s: fortsätter avbruten körning (ändrat sedan %s) från sida %d",
+                 hierarki, typ, sedan_iso, sida)
     else:
-        db.set_sync_status(kalla=kalla_nyckel, antal_poster=totalt,
-                           detaljer={"publicerad_sedan": _iso_utc(korningens_start)})
+        if sedan is None:
+            sedan = bestam_publicerad_sedan(typ)
+            if sedan is None:
+                return None
+        sedan_iso = _iso_utc(sedan)
+        start_iso = _iso_utc(datetime.now(timezone.utc))
+        sida      = 1
+    misslyckade: list[str] = list(detaljer.get("misslyckade") or [])
+
+    def _spara(ny_sida: int, antal: int | None = None) -> None:
+        detaljer["pagaende"] = {"sedan": sedan_iso, "start": start_iso, "sida": ny_sida}
+        detaljer["misslyckade"] = sorted(set(misslyckade))
+        db.set_sync_status(kalla=kalla_nyckel, antal_poster=antal, detaljer=detaljer)
+
+    def _behandla(uris: list) -> dict:
+        utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
+        if not uris:
+            return utfall
+        with ThreadPoolExecutor(max_workers=max_trad) as pool:
+            for framtid in as_completed(
+                [pool.submit(_behandla_poster, grupp) for grupp in _chunk(uris, max_trad)]
+            ):
+                _sla_ihop(utfall, framtid.result())
+        return utfall
+
+    totalt = listade = 0
+    sidor = 0
+    klar = False
+    while True:
+        poster = fx.hamta_lista(hierarki=hierarki, typ=typ, sida=sida, limit=10,
+                                publicerad_sedan=sedan_iso)
+        if not poster:
+            klar = True
+            break
+        listade += len(poster)
+        if not torrkoring:
+            utfall = _behandla([p.get("akn_uri") for p in poster if p.get("akn_uri")])
+            totalt += utfall[OK]
+            misslyckade.extend(utfall[FEL])
+            _spara(sida)
+        if sida % 50 == 0:
+            log.info("%s/%s: sida %d, %d poster listade, %d lagrade, %d fel hittills",
+                     hierarki, typ, sida, listade, totalt, len(set(misslyckade)))
+        sidor += 1
+        if len(poster) < 10:
+            klar = True
+            break
+        if max_sidor and sidor >= max_sidor:
+            break
+        sida += 1
+
+    log.info("%s/%s: %d poster listade sedan %s, %d dokument lagrade",
+             hierarki, typ, listade, sedan_iso, totalt)
+    if torrkoring:
+        return listade
+    if not klar:
+        log.info("%s/%s: avbruten efter %d sidor; nästa körning fortsätter på sida %d",
+                 hierarki, typ, sidor, sida + 1)
+        return totalt
+
+    if misslyckade:
+        log.info("%s/%s: prövar %d misslyckade dokument igen", hierarki, typ, len(set(misslyckade)))
+        utfall = _behandla(sorted(set(misslyckade)))
+        totalt += utfall[OK]
+        misslyckade = utfall[FEL]
+    if misslyckade:
+        log.error("%s/%s: %d dokument kunde fortfarande inte hämtas; tidpunkten flyttas "
+                  "inte fram och de prövas igen nästa körning", hierarki, typ, len(misslyckade))
+        _spara(sida, totalt)
+        return totalt
+
+    detaljer.pop("pagaende", None)
+    detaljer["misslyckade"] = []
+    detaljer["publicerad_sedan"] = start_iso
+    db.set_sync_status(kalla=kalla_nyckel, antal_poster=totalt, detaljer=detaljer)
     return totalt
 
 
@@ -435,6 +511,7 @@ def main():
     parser.add_argument("--typ",              type=str,            help="Synka bara en specifik typ (t.ex. statute)")
     parser.add_argument("--ar",               type=int,            help="Synka ett specifikt år")
     parser.add_argument("--sedan",            type=str,            help="Inkrementell synk från tidpunkt (ISO 8601)")
+    parser.add_argument("--max-sidor",        type=int, default=0, help="Högst så många listsidor per typ och körning (0 = alla); resten tas nästa körning")
     parser.add_argument("--trad",             type=int, default=2, help="Antal parallella trådar (default 2)")
     parser.add_argument("--torr",             action="store_true", help="Torrkörning (hämtar /list men ingen XML)")
     parser.add_argument("--installera-schema", action="store_true", help="Installera schemalagt jobb via cron eller launchd (se .env)")
@@ -458,15 +535,16 @@ def main():
 
     for hierarki, typ in kallor:
         if not args.alla and not args.ar:
-            sedan = _tolka_tid(args.sedan) if args.sedan else bestam_publicerad_sedan(typ)
+            sedan = _tolka_tid(args.sedan) if args.sedan else None
             if args.sedan and sedan is None:
                 log.error("Ogiltig tidpunkt för --sedan: %s", args.sedan)
                 sys.exit(1)
-            if sedan is not None:
-                log.info("=== Synkar %s/%s, ändrat sedan %s ===", hierarki, typ, _iso_utc(sedan))
-                start = time.time()
-                antal = synka_sedan(hierarki, typ, sedan, args.torr, args.trad)
-                log.info("=== %s/%s klar: %d dokument på %.0f s ===",
+            log.info("=== Synkar %s/%s (publicerat eller ändrat sedan en tidpunkt) ===",
+                     hierarki, typ)
+            start = time.time()
+            antal = synka_sedan(hierarki, typ, sedan, args.torr, args.trad, args.max_sidor)
+            if antal is not None:
+                log.info("=== %s/%s: %d dokument på %.0f s ===",
                          hierarki, typ, antal, time.time() - start)
                 continue
 
