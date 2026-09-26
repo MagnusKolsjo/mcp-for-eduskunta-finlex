@@ -33,6 +33,14 @@ Flaggor:
   --ar AR      Synka ett specifikt år
   --sedan TID  Inkrementell synk från en given tidpunkt (ISO 8601, t.ex. 2026-05-01)
   --max-sidor N  Högst N listsidor per typ; en avbruten körning fortsätter nästa gång
+  --i-kraft    Konsoliderad lagtext: bara gällande författningar
+  --fran-ar AR Inkrementell synk: bara dokument från år AR (standard: samma
+               första år som --alla, t.ex. 2000 för konsoliderad lagtext)
+
+Konsoliderad lagtext: bara senaste lydelsen per författning lagras (listan
+filtreras på fin@latest; svenska hämtas med samma version). En version som
+redan finns lokalt med text hämtas inte igen, så en omkörning kostar i
+huvudsak listanropen.
   --trad N     Antal parallella trådar (default 2 — respektera rate limit)
   --torr       Torrkörning: hämta /list men ladda inte ned XML
 """
@@ -108,6 +116,7 @@ def synka_typ(
             typ=typ,
             start_ar=ar,
             slut_ar=ar,
+            **_lista_filter(typ),
         )
 
         if not poster:
@@ -124,7 +133,8 @@ def synka_typ(
         utfall: dict = {OK: 0, SAKNAS: 0, FEL: []}
         with ThreadPoolExecutor(max_workers=max_trad) as pool:
             for framtid in as_completed(
-                [pool.submit(_behandla_poster, grupp) for grupp in _chunk(poster, max_trad)]
+                [pool.submit(_behandla_poster, grupp)
+                 for grupp in _chunk(_att_hamta(typ, poster)[0], max_trad)]
             ):
                 _sla_ihop(utfall, framtid.result())
         totalt += utfall[OK]
@@ -174,6 +184,15 @@ def _behandla_uri(akn_uri: str) -> str:
         meta     = fx.parsad_akn_metadata(rot)
         fulltext = fx.extrahera_fulltext(rot)
 
+        # Samma URI betyder samma version. En väsentligt kortare text för en
+        # redan lagrad version tyder på ett fel hos källan eller i parsningen;
+        # den lagrade texten behålls och avvikelsen loggas.
+        lagrad = db.lagrad_textlangd(akn_uri)
+        if lagrad and lagrad >= 200 and len(fulltext or "") < 0.5 * lagrad:
+            log.warning("Ny text för %s är %d tecken mot lagrade %d; behåller den lagrade",
+                        akn_uri, len(fulltext or ""), lagrad)
+            fulltext = None
+
         # Bygg URI för det andra språket (för lagring)
         if sprak == "fi":
             akn_uri_fi = akn_uri
@@ -220,6 +239,39 @@ def _behandla_poster(poster: list) -> dict:
         else:
             utfall[r] += 1
     return utfall
+
+
+# Konsoliderad lagtext finns i tidsversioner. Bara den senaste lydelsen per
+# författning lagras; äldre lydelser hämtas live vid behov (fi_hamta_lag med
+# en versionerad AKN-URI). Listan filtreras därför på fin@latest, och den
+# svenska lydelsen hämtas med samma versionsbeteckning.
+VERSIONERADE_TYPER = {"statute-consolidated"}
+
+
+def _lista_filter(typ: str) -> dict:
+    return {"sprak_version": "fin@latest"} if typ in VERSIONERADE_TYPER else {}
+
+
+def _att_hamta(typ: str, poster: list[dict]) -> tuple[list[str], int]:
+    """
+    URI:er att hämta ur en listsida, och hur många som hoppades över.
+
+    Versionerade typer: finsk och svensk URI för den listade versionen,
+    utom de som redan finns lokalt med text. Övriga typer saknar
+    versionsbeteckning och hämtas alla, eftersom publishedSince är den enda
+    ändringssignalen.
+    """
+    uris = [p["akn_uri"] for p in poster if p.get("akn_uri")]
+    if typ not in VERSIONERADE_TYPER:
+        return uris, 0
+    kandidater: list[str] = []
+    for u in uris:
+        kandidater.append(u)
+        if "/fin@" in u:
+            kandidater.append(fx.byt_sprak_i_uri(u, fx.SPRAK_SV))
+    lagrade = db.finlex_uri_med_text(kandidater)
+    att_hamta = [u for u in dict.fromkeys(kandidater) if u not in lagrade]
+    return att_hamta, len(kandidater) - len(att_hamta)
 
 
 def _sla_ihop(summa: dict, del_: dict) -> None:
@@ -298,6 +350,8 @@ def synka_sedan(
     torrkoring: bool = False,
     max_trad: int = 2,
     max_sidor: int = 0,
+    i_kraft: bool | None = None,
+    fran_ar: int | None = None,
 ) -> int | None:
     """
     Synkar alla dokument av en typ som publicerats eller ändrats sedan `sedan`.
@@ -318,7 +372,8 @@ def synka_sedan(
     _, detaljer = _las_detaljer(kalla_nyckel)
     pagaende = detaljer.get("pagaende")
 
-    if pagaende and (sedan is None or _iso_utc(sedan) == pagaende.get("sedan")):
+    if (pagaende and pagaende.get("i_kraft") == i_kraft and pagaende.get("fran_ar") == fran_ar
+            and (sedan is None or _iso_utc(sedan) == pagaende.get("sedan"))):
         sedan_iso = pagaende["sedan"]
         start_iso = pagaende["start"]
         sida      = int(pagaende.get("sida", 0)) + 1
@@ -335,7 +390,8 @@ def synka_sedan(
     misslyckade: list[str] = list(detaljer.get("misslyckade") or [])
 
     def _spara(ny_sida: int, antal: int | None = None) -> None:
-        detaljer["pagaende"] = {"sedan": sedan_iso, "start": start_iso, "sida": ny_sida}
+        detaljer["pagaende"] = {"sedan": sedan_iso, "start": start_iso, "sida": ny_sida,
+                                "i_kraft": i_kraft, "fran_ar": fran_ar}
         detaljer["misslyckade"] = sorted(set(misslyckade))
         db.set_sync_status(kalla=kalla_nyckel, antal_poster=antal, detaljer=detaljer)
 
@@ -350,24 +406,27 @@ def synka_sedan(
                 _sla_ihop(utfall, framtid.result())
         return utfall
 
-    totalt = listade = 0
+    totalt = listade = hoppade = 0
     sidor = 0
     klar = False
     while True:
         poster = fx.hamta_lista(hierarki=hierarki, typ=typ, sida=sida, limit=10,
-                                publicerad_sedan=sedan_iso)
+                                publicerad_sedan=sedan_iso, i_kraft=i_kraft,
+                                start_ar=fran_ar, **_lista_filter(typ))
         if not poster:
             klar = True
             break
         listade += len(poster)
+        uris, n_hoppade = _att_hamta(typ, poster)
+        hoppade += n_hoppade
         if not torrkoring:
-            utfall = _behandla([p.get("akn_uri") for p in poster if p.get("akn_uri")])
+            utfall = _behandla(uris)
             totalt += utfall[OK]
             misslyckade.extend(utfall[FEL])
             _spara(sida)
         if sida % 50 == 0:
-            log.info("%s/%s: sida %d, %d poster listade, %d lagrade, %d fel hittills",
-                     hierarki, typ, sida, listade, totalt, len(set(misslyckade)))
+            log.info("%s/%s: sida %d, %d poster listade, %d redan lagrade, %d hämtade, %d fel",
+                     hierarki, typ, sida, listade, hoppade, totalt, len(set(misslyckade)))
         sidor += 1
         if len(poster) < 10:
             klar = True
@@ -376,8 +435,8 @@ def synka_sedan(
             break
         sida += 1
 
-    log.info("%s/%s: %d poster listade sedan %s, %d dokument lagrade",
-             hierarki, typ, listade, sedan_iso, totalt)
+    log.info("%s/%s: %d poster listade sedan %s; %d språkversioner redan lagrade; "
+             "%d dokument hämtade", hierarki, typ, listade, sedan_iso, hoppade, totalt)
     if torrkoring:
         return listade
     if not klar:
@@ -511,6 +570,8 @@ def main():
     parser.add_argument("--typ",              type=str,            help="Synka bara en specifik typ (t.ex. statute)")
     parser.add_argument("--ar",               type=int,            help="Synka ett specifikt år")
     parser.add_argument("--sedan",            type=str,            help="Inkrementell synk från tidpunkt (ISO 8601)")
+    parser.add_argument("--fran-ar",          type=int,            help="Inkrementell synk: bara dokument från detta år (standard: samma första år som full synk)")
+    parser.add_argument("--i-kraft",          action="store_true", help="Konsoliderad lagtext: bara gällande författningar (Finlex isInForce)")
     parser.add_argument("--max-sidor",        type=int, default=0, help="Högst så många listsidor per typ och körning (0 = alla); resten tas nästa körning")
     parser.add_argument("--trad",             type=int, default=2, help="Antal parallella trådar (default 2)")
     parser.add_argument("--torr",             action="store_true", help="Torrkörning (hämtar /list men ingen XML)")
@@ -542,7 +603,12 @@ def main():
             log.info("=== Synkar %s/%s (publicerat eller ändrat sedan en tidpunkt) ===",
                      hierarki, typ)
             start = time.time()
-            antal = synka_sedan(hierarki, typ, sedan, args.torr, args.trad, args.max_sidor)
+            # Samma årsgräns som den fullständiga synken, så att den inkrementella
+            # inte i det tysta utvidgar samlingen bakåt i tiden.
+            fran_ar = args.fran_ar if args.fran_ar else ALDSTA_AR.get(typ)
+            antal = synka_sedan(hierarki, typ, sedan, args.torr, args.trad, args.max_sidor,
+                                i_kraft=True if (args.i_kraft and typ in VERSIONERADE_TYPER) else None,
+                                fran_ar=fran_ar)
             if antal is not None:
                 log.info("=== %s/%s: %d dokument på %.0f s ===",
                          hierarki, typ, antal, time.time() - start)

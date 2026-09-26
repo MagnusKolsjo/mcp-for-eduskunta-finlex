@@ -48,6 +48,16 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
   `publicerad_sedan` flyttas fram först när listan är genomgången utan kvarstående fel,
   till starttiden för körningens första försök. `--max-sidor` begränsar en körning.
   Listanrop som möter nätverksfel prövas också igen.
+- **Konsoliderad lagtext: bara senaste lydelsen, och bara verkliga ändringar hämtas.**
+  Listan filtreras på `fin@latest` (Finlex `/list`), den svenska lydelsen hämtas med
+  samma versionsbeteckning, och en version (AKN-URI med `@version`) som redan finns
+  lokalt med text hämtas inte igen. Finlex publicerade om hela samlingen i maj 2026, så
+  `publishedSince` ger nästan allt; med versionsjämförelsen blir en omkörning i huvudsak
+  listanrop. Äldre lydelser hämtas live vid behov. Den inkrementella synken följer
+  samma första år som den fullständiga (`--fran-ar` ändrar det), och `--i-kraft`
+  begränsar till gällande författningar.
+- En redan lagrad text skrivs inte över med en väsentligt kortare (under hälften) för
+  samma version; avvikelsen loggas.
 - **Brytande: kräver `mcp>=2.0,<3`.** Servern bygger på `MCPServer`; `mcp.server.fastmcp`
   finns inte i mcp 2.x.
 - **Brytande: http-läget kräver `MCP_API_KEY`.** Utan nyckel avbryts uppstarten med

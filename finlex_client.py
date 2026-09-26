@@ -184,6 +184,7 @@ def hamta_lista(
     sprak_version: Optional[str] = None,
     titel_innehaller: Optional[str] = None,
     publicerad_sedan: Optional[str] = None,
+    i_kraft: Optional[bool] = None,
 ) -> list[dict]:
     """
     Hämtar en sida från /list-endpointen för en dokumenttyp.
@@ -201,6 +202,11 @@ def hamta_lista(
       titel_innehaller — titelfilter
       publicerad_sedan — ISO 8601-tidpunkt med tidszon; bara poster som
                          publicerats eller ändrats sedan dess
+      sprak_version    — "fin@latest"/"swe@latest" ger bara senaste lydelsen per
+                         författning (konsoliderad lagtext); utan den listas
+                         alla historiska versioner på båda språken
+      i_kraft          — bara gällande (True) eller upphävda (False) författningar;
+                         gäller konsoliderad lagtext
     """
     url = f"{API_BASE}/akn/fi/{hierarki}/{typ}/list"
     params: dict = {"page": sida, "limit": min(limit, 10)}
@@ -214,6 +220,8 @@ def hamta_lista(
         params["titleContains"] = titel_innehaller
     if publicerad_sedan:
         params["publishedSince"] = publicerad_sedan
+    if i_kraft is not None:
+        params["isInForce"] = "true" if i_kraft else "false"
 
     svar = _get_json(url, params)
     if isinstance(svar, list):
@@ -231,6 +239,7 @@ def hamta_alla_i_lista(
     slut_ar: Optional[int] = None,
     sprak_version: Optional[str] = None,
     publicerad_sedan: Optional[str] = None,
+    i_kraft: Optional[bool] = None,
 ) -> list[dict]:
     """
     Paginerar igenom hela /list-endpointen och returnerar alla poster.
@@ -250,6 +259,7 @@ def hamta_alla_i_lista(
             slut_ar=slut_ar,
             sprak_version=sprak_version,
             publicerad_sedan=publicerad_sedan,
+            i_kraft=i_kraft,
         )
         if not poster:
             break

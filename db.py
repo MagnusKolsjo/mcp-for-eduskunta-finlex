@@ -661,6 +661,50 @@ def antal_chunks_med_embedding(dok_id: int, sprak: str) -> int:
         return cur.fetchone()[0]
 
 
+def finlex_uri_med_text(uris: list[str]) -> set[str]:
+    """
+    De AKN-URI:er (med version) som redan finns lokalt med text på sitt språk.
+
+    En URI räknas som lagrad när raden har råtext (även tom: dokument med
+    bara titel) eller chunks på språket. Versionsbeteckningen ingår i URI:n
+    (…/fin@20180817), så en ny lydelse ger en ny URI och hämtas.
+    """
+    p, t = _ph(), _prefix()
+    funna: set[str] = set()
+    for sprak, uri_kol, text_kol, chunk_kol in (
+        ("fin@", "akn_uri_fi", "fulltext_fi", "text_fi"),
+        ("swe@", "akn_uri_sv", "fulltext_sv", "text_sv"),
+    ):
+        urval = [u for u in uris if f"/{sprak}" in u]
+        if not urval:
+            continue
+        with _cursor() as cur:
+            cur.execute(
+                f"""SELECT d.{uri_kol} FROM {t}dokument d
+                    WHERE d.{uri_kol} IN ({', '.join([p] * len(urval))})
+                      AND (d.{text_kol} IS NOT NULL
+                           OR EXISTS (SELECT 1 FROM {t}chunks c
+                                      WHERE c.dokument_id = d.id AND c.{chunk_kol} IS NOT NULL))""",
+                urval,
+            )
+            funna.update(r[0] for r in cur.fetchall())
+    return funna
+
+
+def lagrad_textlangd(akn_uri: str) -> Optional[int]:
+    """Längden på lagrad råtext för en AKN-URI på dess språk, eller None."""
+    sv = "/swe@" in akn_uri
+    uri_kol  = "akn_uri_sv" if sv else "akn_uri_fi"
+    text_kol = "fulltext_sv" if sv else "fulltext_fi"
+    with _cursor() as cur:
+        cur.execute(
+            f"SELECT length({text_kol}) FROM {_prefix()}dokument WHERE {uri_kol} = {_ph()}",
+            (akn_uri,),
+        )
+        rad = cur.fetchone()
+    return rad[0] if rad else None
+
+
 def rensa_fulltext(dok_id: int, sprak: str) -> None:
     """Tar bort ett språks råtext ur dokument när texten finns som chunks."""
     kol = "fulltext_fi" if sprak == "fi" else "fulltext_sv"
