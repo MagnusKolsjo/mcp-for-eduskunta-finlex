@@ -8,6 +8,10 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Fixat
 
+- En omchunkning som gav färre chunks än förut lämnade språkets gamla text kvar utan vektor på
+  de överskjutande raderna. Texten kunde träffas i fulltextsökningen, och dokumentet embeddades
+  om vid varje körning. Spara-steget tömmer nu de raderna och skriver inte längre varje rad två
+  gånger, vilket halverar arbetet i vektorindexen.
 - `synk_daglig.sh` väljer Python-tolken efter att `.env` laddats, så att `PYTHON_SOKVAG` i `.env`
   faktiskt gäller. Tidigare sattes tolken före inläsningen och inställningen hade ingen verkan.
 - Samtidiga sökanrop kunde krascha servern med SIGSEGV när embeddingmodellen kördes på

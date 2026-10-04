@@ -623,12 +623,29 @@ def spara_chunks(dok_id: int, chunks: list[dict], embeddings, sprak: str) -> Non
     Befintliga rader för samma dokument_id och chunk_index uppdateras bara i
     det här språkets kolumner; det andra språkets text och vektor lämnas.
     Kräver Postgres med pgvector.
+
+    Ger en omchunkning färre chunks än förut töms språkets kolumner på de
+    överskjutande raderna. Annars blev gammal text kvar utan vektor: den
+    kunde träffas i fulltextsökningen, och dokumentet valdes om vid varje
+    körning som om en tidigare körning hade avbrutits. Rader under det nya
+    antalet töms inte först, eftersom upserten nedan skriver över dem; det
+    sparar en extra skrivning i vektorindexen per rad.
     """
     s = "fi" if sprak == "fi" else "sv"
     with _cursor() as cur:
         typ = vektortyp(s, cur)
         cur.execute(
-            f"UPDATE finland.chunks SET embedding_{s} = NULL WHERE dokument_id = %s",
+            f"""
+            UPDATE finland.chunks
+               SET text_{s} = NULL, embedding_{s} = NULL,
+                   tecken_start_{s} = NULL, tecken_slut_{s} = NULL
+             WHERE dokument_id = %s AND chunk_index >= %s
+            """,
+            (dok_id, len(chunks)),
+        )
+        cur.execute(
+            "DELETE FROM finland.chunks WHERE dokument_id = %s"
+            " AND text_fi IS NULL AND text_sv IS NULL",
             (dok_id,),
         )
         for ch, emb in zip(chunks, embeddings):
