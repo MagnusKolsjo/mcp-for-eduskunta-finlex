@@ -8,6 +8,8 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Fixat
 
+- `synk_daglig.sh` väljer Python-tolken efter att `.env` laddats, så att `PYTHON_SOKVAG` i `.env`
+  faktiskt gäller. Tidigare sattes tolken före inläsningen och inställningen hade ingen verkan.
 - Samtidiga sökanrop kunde krascha servern med SIGSEGV när embeddingmodellen kördes på
   Apple-GPU:n (MPS). PyTorchs MPS-backend fyller sina kärncacher utan lås första gången de
   används, och verktygen körs på parallella arbetstrådar. Alla `encode()`-anrop i processen
