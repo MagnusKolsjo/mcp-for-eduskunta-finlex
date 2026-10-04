@@ -75,6 +75,27 @@ _modell_sv = None
 # sökningar laddar samma modell var för sig.
 _modell_lock = threading.Lock()
 
+# PyTorchs MPS-backend är inte trådsäker: MetalShaderLibrary fyller sina
+# kärncacher utan lås första gången de används, så två samtidiga encode() från
+# arbetstrådarna kan korrumpera dem och krascha hela processen med SIGSEGV.
+# Låset gäller hela processen och inte en enskild modell, eftersom cacherna
+# delas av fi- och sv-modellen när båda ligger på samma enhet.
+_encode_lock = threading.Lock()
+
+
+class _SerialiseradModell:
+    """Omsluter en SentenceTransformer så att encode() alltid tar _encode_lock."""
+
+    def __init__(self, modell) -> None:
+        self._modell = modell
+
+    def encode(self, *args, **kwargs):
+        with _encode_lock:
+            return self._modell.encode(*args, **kwargs)
+
+    def __getattr__(self, namn):
+        return getattr(self._modell, namn)
+
 # Query-expansion
 QUERY_EXPANSION_ENABLED     = os.getenv("QUERY_EXPANSION_ENABLED", "false").lower() == "true"
 QUERY_EXPANSION_BASE_URL    = os.getenv("QUERY_EXPANSION_BASE_URL", "")
@@ -419,7 +440,7 @@ def _hamta_modell_fi():
                 from sentence_transformers import SentenceTransformer
                 log.info("Laddar embeddingmodell (fi): %s", EMBEDDING_MODEL_FI)
                 with _tysta_stdout():
-                    _modell_fi = SentenceTransformer(EMBEDDING_MODEL_FI)
+                    _modell_fi = _SerialiseradModell(SentenceTransformer(EMBEDDING_MODEL_FI))
     return _modell_fi
 
 
@@ -432,7 +453,7 @@ def _hamta_modell_sv():
                 from sentence_transformers import SentenceTransformer
                 log.info("Laddar embeddingmodell (sv): %s", EMBEDDING_MODEL_SV)
                 with _tysta_stdout():
-                    _modell_sv = SentenceTransformer(EMBEDDING_MODEL_SV)
+                    _modell_sv = _SerialiseradModell(SentenceTransformer(EMBEDDING_MODEL_SV))
     return _modell_sv
 
 
