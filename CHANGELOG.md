@@ -8,6 +8,9 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ### Fixat
 
+- `CRON_SCHEMA` i `config.example.env` står inom citattecken. `synk_daglig.sh` läser `.env` med
+  `source`, och ett ociterat värde med mellanslag tolkades som ett kommando: skriptet avbröts
+  med "command not found" (kod 127) innan synken startade.
 - En omchunkning som gav färre chunks än förut lämnade språkets gamla text kvar utan vektor på
   de överskjutande raderna. Texten kunde träffas i fulltextsökningen, och dokumentet embeddades
   om vid varje körning. Spara-steget tömmer nu de raderna och skriver inte längre varje rad två
