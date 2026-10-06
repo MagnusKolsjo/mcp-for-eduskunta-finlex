@@ -6,6 +6,8 @@ och versionshanteringen följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-06
+
 ### Fixat
 
 - `CRON_SCHEMA` i `config.example.env` står inom citattecken. `synk_daglig.sh` läser `.env` med
